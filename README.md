@@ -125,6 +125,8 @@ the compiler bug free and compiling it with the poisoned compiler.
 ```sh
 git clone https://repo.or.cz/tinycc.git clean
 
+cd clean && ./configure && make tccdefs_.h && cd ..
+
 ./tinycc/tcc -B./tinycc \
     -I./clean -I./clean/include \
     ./clean/tcc.c -o tcc2 -lm -ldl -lpthread
